@@ -1,6 +1,13 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
+
 
 
 class PanelForcesSurf(om.ExplicitComponent):
@@ -22,11 +29,18 @@ class PanelForcesSurf(om.ExplicitComponent):
         There is one of these per surface.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
+    surfaces: list[Surface]
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
+        surfaces = f["surfaces"]
 
         system_size = 0
 
@@ -40,7 +54,7 @@ class PanelForcesSurf(om.ExplicitComponent):
 
         arange = np.arange(3 * system_size)
 
-        self.add_input("panel_forces", shape=(system_size, 3), units="N")
+        d.add_input("panel_forces", shape=(system_size, 3), units="N")
 
         # Loop through the surfaces and add the output of sec_forces based on
         # the size of each surface. Here we keep track of the total indices
@@ -56,16 +70,17 @@ class PanelForcesSurf(om.ExplicitComponent):
 
             ind2 += (nx - 1) * (ny - 1) * 3
 
-            self.add_output(sec_forces_name, shape=(nx - 1, ny - 1, 3), units="N", tags=["mphys_coupling"])
+            d.add_output(sec_forces_name, shape=(nx - 1, ny - 1, 3), units="N", tags=["mphys_coupling"])
 
             rows = np.arange((nx - 1) * (ny - 1) * 3)
             cols = arange[ind1:ind2]
-            self.declare_partials(sec_forces_name, "panel_forces", val=1.0, rows=rows, cols=cols)
+            d.declare_partials(sec_forces_name, "panel_forces", val=1.0, rows=rows, cols=cols)
 
             ind1 += (nx - 1) * (ny - 1) * 3
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
-        surfaces = self.options["surfaces"]
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        surfaces = self.surfaces
 
         ind1, ind2 = 0, 0
         for surface in surfaces:

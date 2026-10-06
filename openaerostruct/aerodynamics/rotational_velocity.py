@@ -1,6 +1,14 @@
-import numpy as np
+from functools import cached_property
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values, vlm_system_size
+from openaerostruct.utils.surface import Surface
+
 
 
 class RotationalVelocity(om.ExplicitComponent):
@@ -28,11 +36,18 @@ class RotationalVelocity(om.ExplicitComponent):
         This array contains points for all lifting surfaces in the problem.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
+    surfaces: list[Surface]
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
+        surfaces = f["surfaces"]
 
         system_size = 0
         sizes = []
@@ -47,13 +62,11 @@ class RotationalVelocity(om.ExplicitComponent):
             system_size += size
             sizes.append(size)
 
-        self.system_size = system_size
+        d.add_input("coll_pts", shape=(system_size, 3), units="m")
+        d.add_input("omega", val=np.zeros((3,)), units="rad/s", tags=["mphys_input"])
+        d.add_input("cg", val=np.ones((3,)), units="m", tags=["mphys_input"])
 
-        self.add_input("coll_pts", shape=(system_size, 3), units="m")
-        self.add_input("omega", val=np.zeros((3,)), units="rad/s", tags=["mphys_input"])
-        self.add_input("cg", val=np.ones((3,)), units="m", tags=["mphys_input"])
-
-        self.add_output("rotational_velocities", shape=(system_size, 3), units="m/s")
+        d.add_output("rotational_velocities", shape=(system_size, 3), units="m/s")
 
         # First Half of cross product
         row = np.array([1, 2, 0])
@@ -69,16 +82,22 @@ class RotationalVelocity(om.ExplicitComponent):
         rows = np.concatenate([rows1, rows2])
         cols = np.concatenate([cols1, cols2])
 
-        self.declare_partials("rotational_velocities", "cg", rows=rows, cols=cols)
-        self.declare_partials("rotational_velocities", "omega", rows=rows, cols=cols)
+        d.declare_partials("rotational_velocities", "cg", rows=rows, cols=cols)
+        d.declare_partials("rotational_velocities", "omega", rows=rows, cols=cols)
 
         cols1 = np.tile(col, system_size) + np.repeat(3 * np.arange(system_size), 3)
         cols2 = np.tile(row, system_size) + np.repeat(3 * np.arange(system_size), 3)
         cols = np.concatenate([cols1, cols2])
 
-        self.declare_partials("rotational_velocities", "coll_pts", rows=rows, cols=cols)
+        d.declare_partials("rotational_velocities", "coll_pts", rows=rows, cols=cols)
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
+    @cached_property
+    def system_size(self) -> int:
+        """Total number of VLM panels over all surfaces."""
+        return vlm_system_size(self.surfaces)
+
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         # Angular velocity term
         cg = inputs["cg"]
         omega = inputs["omega"]
@@ -94,9 +113,13 @@ class RotationalVelocity(om.ExplicitComponent):
         omega = inputs["omega"]
         c_pts = inputs["coll_pts"]
 
-        surfaces = self.options["surfaces"]
+        surfaces = self.surfaces
         idx = jdx = 0
         ii = self.system_size * 3
+        # om4 subjacs are write-only (ai/OM4_NEEDS.md N-005): fill locally, assign once
+        d_cg = np.zeros(2 * ii)
+        d_cpts = np.zeros(2 * ii)
+        d_omega = np.zeros(2 * ii)
         for surface in surfaces:
             mesh = surface["mesh"]
             nx = mesh.shape[0]
@@ -107,14 +130,18 @@ class RotationalVelocity(om.ExplicitComponent):
 
             # Cross product derivatives organized so we can tile a variable directly into slices
 
-            J["rotational_velocities", "cg"][idx : idx + size * 3] = np.tile(omega, size)
-            J["rotational_velocities", "cg"][idx + ii : idx + ii + size * 3] = -np.tile(omega, size)
+            d_cg[idx : idx + size * 3] = np.tile(omega, size)
+            d_cg[idx + ii : idx + ii + size * 3] = -np.tile(omega, size)
 
-            J["rotational_velocities", "coll_pts"][idx : idx + size * 3] = -np.tile(omega, size)
-            J["rotational_velocities", "coll_pts"][idx + ii : idx + ii + size * 3] = np.tile(omega, size)
+            d_cpts[idx : idx + size * 3] = -np.tile(omega, size)
+            d_cpts[idx + ii : idx + ii + size * 3] = np.tile(omega, size)
 
-            J["rotational_velocities", "omega"][idx : idx + size * 3] = r.flatten()
-            J["rotational_velocities", "omega"][idx + ii : idx + ii + size * 3] = -r.flatten()
+            d_omega[idx : idx + size * 3] = r.flatten()
+            d_omega[idx + ii : idx + ii + size * 3] = -r.flatten()
 
             idx += 3 * size
             jdx += size
+
+        J["rotational_velocities", "cg"] = d_cg
+        J["rotational_velocities", "coll_pts"] = d_cpts
+        J["rotational_velocities", "omega"] = d_omega

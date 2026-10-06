@@ -1,6 +1,14 @@
-import numpy as np
+from functools import cached_property
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values, vlm_system_size
+from openaerostruct.utils.surface import Surface
+
 
 from openaerostruct.utils.vector_algebra import compute_cross, compute_cross_deriv1, compute_cross_deriv2
 
@@ -31,11 +39,18 @@ class PanelForces(om.ExplicitComponent):
         All of the forces acting on all panels in the total system.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
+    surfaces: list[Surface]
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
+        surfaces = f["surfaces"]
 
         system_size = 0
 
@@ -46,29 +61,27 @@ class PanelForces(om.ExplicitComponent):
 
             system_size += (nx - 1) * (ny - 1)
 
-        self.system_size = system_size
+        d.add_input("rho", units="kg/m**3", tags=["mphys_input"])
+        d.add_input("horseshoe_circulations", shape=system_size, units="m**2/s")
+        d.add_input("force_pts_velocities", shape=(system_size, 3), units="m/s")
+        d.add_input("bound_vecs", shape=(system_size, 3), units="m")
 
-        self.add_input("rho", units="kg/m**3", tags=["mphys_input"])
-        self.add_input("horseshoe_circulations", shape=system_size, units="m**2/s")
-        self.add_input("force_pts_velocities", shape=(system_size, 3), units="m/s")
-        self.add_input("bound_vecs", shape=(system_size, 3), units="m")
-
-        self.add_output("panel_forces", shape=(system_size, 3), units="N")
+        d.add_output("panel_forces", shape=(system_size, 3), units="N")
 
         # Set up all the sparse Jacobians
-        self.declare_partials(
+        d.declare_partials(
             "panel_forces",
             "rho",
             rows=np.arange(3 * system_size),
             cols=np.zeros(3 * system_size, int),
         )
-        self.declare_partials(
+        d.declare_partials(
             "panel_forces",
             "horseshoe_circulations",
             rows=np.arange(3 * system_size),
             cols=np.outer(np.arange(system_size), np.ones(3, int)).flatten(),
         )
-        self.declare_partials(
+        d.declare_partials(
             "panel_forces",
             "force_pts_velocities",
             rows=np.einsum(
@@ -82,7 +95,7 @@ class PanelForces(om.ExplicitComponent):
                 np.ones(3, int),
             ).flatten(),
         )
-        self.declare_partials(
+        d.declare_partials(
             "panel_forces",
             "bound_vecs",
             rows=np.einsum(
@@ -96,8 +109,14 @@ class PanelForces(om.ExplicitComponent):
                 np.ones(3, int),
             ).flatten(),
         )
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
+    @cached_property
+    def system_size(self) -> int:
+        """Total number of VLM panels over all surfaces."""
+        return vlm_system_size(self.surfaces)
+
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         rho = inputs["rho"][0]
         horseshoe_circulations = np.outer(inputs["horseshoe_circulations"], np.ones(3))
         velocities = inputs["force_pts_velocities"]

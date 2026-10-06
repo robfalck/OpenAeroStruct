@@ -1,0 +1,64 @@
+[workspace]
+name = "openaerostruct"
+version = "3.0.0.dev0"
+description = "Pixi environment for OpenAeroStruct on OpenMDAO 4 (om4)."
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "linux-64", "win-64"]
+
+[dependencies]
+python = ">=3.12"
+pip = "*"
+numpy = "*"
+scipy = "*"
+networkx = "*"
+pydantic = ">=2,<3"
+pydantic-core = "*"
+rich = ">=15.0.0,<16"
+structlog = ">=24.0.0"
+matplotlib = "*"
+
+[target.win-64.dependencies]
+# Same pin as om4/dymos4: conda-forge MKL 2026.1 and OpenBLAS 0.3.34 both crash
+# on win-64 (missing libiomp5md symbols / AVX2 dgemm access violation).
+libblas = { version = "*", build = "*openblas" }
+libopenblas = { version = "<0.3.34", build = "pthreads*" }
+
+[feature.dev.dependencies]
+ruff = ">=0.15.7,<0.16"
+testflo = "*"
+parameterized = "*"
+# OM3, only for cross-checking ported components against the original numerics.
+openmdao = "*"
+pre-commit = ">=4.0,<5"
+
+[feature.opt.dependencies]
+pyoptsparse = ">=2.14.0"
+
+[feature.py312.dependencies]
+python = "3.12.*"
+
+[feature.py313.dependencies]
+python = "3.13.*"
+
+[pypi-dependencies]
+# OpenAeroStruct itself, installed editable from this repo.
+openaerostruct = { path = ".", editable = true }
+# OpenMDAO 4 framework, installed editable from the sibling checkout.
+om4 = { path = "../om4.git", editable = true }
+# om4 dependencies not on conda-forge (or pinned there differently)
+nicegui = "*"
+jax = "*"
+jaxlib = "*"
+asdex = "*"
+
+[environments]
+default = { features = ["py313", "dev", "opt"] }
+py312 = { features = ["py312", "dev", "opt"] }
+
+[activation]
+env = { JAX_PLATFORMS = "cpu", PYTHONUTF8 = "1" }
+
+[tasks]
+test = "testflo tests -n 1"
+lint = "ruff check openaerostruct tests"
+format = "ruff format openaerostruct tests"

@@ -1,6 +1,13 @@
-import numpy as np
+from functools import cached_property
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 from openaerostruct.utils.vector_algebra import add_ones_axis
 from openaerostruct.utils.vector_algebra import compute_dot, compute_dot_deriv
@@ -101,6 +108,152 @@ def _compute_semi_infinite_vortex_deriv(u, r, r_deriv):
     return (num_deriv * den - num * den_deriv) / den**2 / 4 / np.pi
 
 
+def _compute_semi_infinite_vortex_dalpha(u, du, r):
+    """
+    Derivative of _compute_semi_infinite_vortex(u, r) wrt the freestream direction, along ``du``.
+
+    Replaces OM3's complex-step approximation of d(vel_mtx)/d(alpha) (om4 has no per-subjac
+    approximation; ai/OM4_NEEDS.md N-002).  Only ``u`` depends on alpha.
+    """
+    r_norm = compute_norm(r)
+    num = compute_cross(u, r)
+    num_deriv = compute_cross(du, r)
+    den = r_norm * (r_norm - compute_dot(u, r))
+    den_deriv = -r_norm * compute_dot(du, r)
+    return (num_deriv * den - num * den_deriv) / den**2 / 4 / np.pi
+
+
+def _vel_mtx_patterns(surfaces, num_eval_points):
+    """
+    Return ``{surface name: (rows, cols, repeated)}`` for d vel_mtx / d vectors.
+
+    ``repeated`` is the (kept, deleted) pair of duplicate-entry index sets for symmetric
+    surfaces (None otherwise); compute_partials folds the deleted entries into the kept ones.
+    """
+    patterns = {}
+
+    for surface in surfaces:
+        mesh = surface["mesh"]
+        nx = mesh.shape[0]
+        ny = mesh.shape[1]
+        name = surface["name"]
+
+        ground_effect = surface.get("groundplane", False)
+
+        # Here we set up the rows and cols for the sparse Jacobians.
+
+        # The logic differs if the surface is symmetric or not, due to the
+        # existence of the "ghost" surface; the reflection of the actual.
+        if ground_effect:
+            nx_actual = 2 * nx
+        else:
+            nx_actual = nx
+        if surface["symmetry"]:
+            ny_actual = 2 * ny - 1
+            duplicate_jac_entry_idx_set_1 = np.array([], int)
+            duplicate_jac_entry_idx_set_2 = np.array([], int)
+            jac_start_ind_running_total = 0
+        else:
+            ny_actual = ny
+
+        # Get an array of indices representing the number of entries
+        # in the vectors array.
+        vectors_indices = np.arange(num_eval_points * nx_actual * ny_actual * 3).reshape(
+            (num_eval_points, nx_actual, ny_actual, 3)
+        )
+        vel_mtx_indices = np.arange(num_eval_points * (nx - 1) * (ny - 1) * 3).reshape(
+            (num_eval_points, nx - 1, ny - 1, 3)
+        )
+        vel_mtx_idx_expanded = np.arange(num_eval_points * (nx - 1) * (ny - 1) * 3 * 3).reshape(
+            (num_eval_points, nx - 1, ny - 1, 3, 3)
+        )
+        aic_base = np.einsum("ijkl,m->ijklm", vel_mtx_indices, np.ones(3, int))
+        aic_len = np.sum(np.prod(aic_base.shape))
+
+        if ground_effect:
+            # mirrored surface along the x mesh direction
+            surfaces_to_compute = [vectors_indices[:, :nx, :], vectors_indices[:, nx:, :]]
+        else:
+            surfaces_to_compute = [vectors_indices[:, :, :]]
+
+        rows = np.array([], int)
+        cols = np.array([], int)
+
+        for surface_to_compute in surfaces_to_compute:
+            inds_A = surface_to_compute[:, 0:-1, 1:, :]
+            inds_B = surface_to_compute[:, 0:-1, 0:-1, :]
+            inds_C = surface_to_compute[:, 1:, 0:-1, :]
+            inds_D = surface_to_compute[:, 1:, 1:, :]
+            vertices_to_compute = [inds_A, inds_B, inds_C, inds_D]
+            # symmetric meshes end up with duplicated jacobian entries that need to be deleted later
+            # vertices A and D duplicate their last entries y-wise
+            # vertices B and C duplicate their first entries y-wise
+            jac_dup_sets = [1, 2, 2, 1]
+            for ivert, vertex_to_compute in enumerate(vertices_to_compute):
+                jac_dup_set = jac_dup_sets[ivert]
+                if surface["symmetry"]:
+                    rows = np.concatenate([rows, aic_base.flatten()])
+                    cols = np.concatenate(
+                        [
+                            cols,
+                            np.einsum(
+                                "ijkm,l->ijklm", vertex_to_compute[:, :, : ny - 1, :], np.ones(3, int)
+                            ).flatten(),
+                        ]
+                    )
+                    if jac_dup_set == 1:
+                        duplicate_jac_entry_idx_set_1 = np.concatenate(
+                            [
+                                duplicate_jac_entry_idx_set_1,
+                                jac_start_ind_running_total + vel_mtx_idx_expanded[:, :, -1, :, :].flatten(),
+                            ]
+                        )
+                    jac_start_ind_running_total += aic_len
+
+                    rows = np.concatenate([rows, aic_base[:, :, ::-1, :].flatten()])
+                    cols = np.concatenate(
+                        [
+                            cols,
+                            np.einsum(
+                                "ijkm,l->ijklm", vertex_to_compute[:, :, ny - 1 :, :], np.ones(3, int)
+                            ).flatten(),
+                        ]
+                    )
+                    if jac_dup_set == 2:
+                        duplicate_jac_entry_idx_set_2 = np.concatenate(
+                            [
+                                duplicate_jac_entry_idx_set_2,
+                                jac_start_ind_running_total + vel_mtx_idx_expanded[:, :, 0, :, :].flatten(),
+                            ]
+                        )
+                    jac_start_ind_running_total += aic_len
+
+                else:
+                    rows = np.concatenate([rows, aic_base.flatten()])
+                    cols = np.concatenate(
+                        [cols, np.einsum("ijkm,l->ijklm", vertex_to_compute[:, :, :, :], np.ones(3, int)).flatten()]
+                    )
+
+        repeated = None
+        if surface["symmetry"]:
+            # need to determine the location of duplicate indices, knock them out, and save the locations for compute_partials
+            repeated = (duplicate_jac_entry_idx_set_1.copy(), duplicate_jac_entry_idx_set_2.copy())
+
+            cols = np.delete(cols, duplicate_jac_entry_idx_set_2)
+            rows = np.delete(rows, duplicate_jac_entry_idx_set_2)
+
+            # If this is a right-hand symmetrical wing, we need to flip the "y" indexing
+            right_wing = abs(surface["mesh"][0, 0, 1]) < abs(surface["mesh"][0, -1, 1])
+            if right_wing:
+                flipped_vel_mtx_indices = vel_mtx_indices[:, :, ::-1, :]
+                flipped_rows = flipped_vel_mtx_indices.flatten()[rows]
+                rows = flipped_rows
+
+        patterns[name] = (rows, cols, repeated)
+
+    return patterns
+
+
 class EvalVelMtx(om.ExplicitComponent):
     """
     Computes the aerodynamic influence coefficient (AIC) matrix for the VLM
@@ -153,158 +306,47 @@ class EvalVelMtx(om.ExplicitComponent):
         combination of surface name and evaluation points name.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
-        self.options.declare("eval_name", types=str)
-        self.options.declare("num_eval_points", types=int)
+    surfaces: list[Surface]
+    eval_name: str
+    num_eval_points: int
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
-        eval_name = self.options["eval_name"]
-        num_eval_points = self.options["num_eval_points"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        d = VarDecl()
+        d.add_input("alpha", val=1.0, units="deg", tags=["mphys_input"])
 
-        self.add_input("alpha", val=1.0, units="deg", tags=["mphys_input"])
-
-        self.surface_indices_repeated = dict()
-
-        for surface in surfaces:
-            mesh = surface["mesh"]
-            nx = mesh.shape[0]
-            ny = mesh.shape[1]
+        patterns = _vel_mtx_patterns(f.surfaces, f.num_eval_points)
+        for surface in f.surfaces:
+            nx, ny = surface["mesh"].shape[:2]
             name = surface["name"]
+            nx_actual = 2 * nx if surface.get("groundplane", False) else nx
+            ny_actual = 2 * ny - 1 if surface["symmetry"] else ny
+            vectors_name = "{}_{}_vectors".format(name, f.eval_name)
+            vel_mtx_name = "{}_{}_vel_mtx".format(name, f.eval_name)
 
-            ground_effect = surface.get("groundplane", False)
+            d.add_input(vectors_name, shape=(f.num_eval_points, nx_actual, ny_actual, 3), units="m")
+            d.add_output(vel_mtx_name, shape=(f.num_eval_points, nx - 1, ny - 1, 3), units="1/m")
 
-            # Get the names for the vectors and vel_mtx. We have the lifting
-            # surface name coming in here, as well as the eval_name.
-            vectors_name = "{}_{}_vectors".format(name, eval_name)
-            vel_mtx_name = "{}_{}_vel_mtx".format(name, eval_name)
+            rows, cols, _ = patterns[name]
+            d.declare_partials(vel_mtx_name, vectors_name, rows=rows, cols=cols)
+            # OM3 complex-stepped this column; om4 gets it analytically (see compute_partials).
+            d.declare_partials(vel_mtx_name, "alpha")
+        return d.into(data)
 
-            # Here we set up the rows and cols for the sparse Jacobians.
+    @cached_property
+    def _repeated_indices(self) -> dict:
+        """Duplicate-entry index sets for symmetric surfaces, keyed by surface name."""
+        patterns = _vel_mtx_patterns(self.surfaces, self.num_eval_points)
+        return {name: rep for name, (_, _, rep) in patterns.items()}
 
-            # The logic differs if the surface is symmetric or not, due to the
-            # existence of the "ghost" surface; the reflection of the actual.
-            if ground_effect:
-                nx_actual = 2 * nx
-            else:
-                nx_actual = nx
-            if surface["symmetry"]:
-                ny_actual = 2 * ny - 1
-                duplicate_jac_entry_idx_set_1 = np.array([], int)
-                duplicate_jac_entry_idx_set_2 = np.array([], int)
-                jac_start_ind_running_total = 0
-            else:
-                ny_actual = ny
-
-            self.add_input(vectors_name, shape=(num_eval_points, nx_actual, ny_actual, 3), units="m")
-
-            # Get an array of indices representing the number of entries
-            # in the vectors array.
-            vectors_indices = np.arange(num_eval_points * nx_actual * ny_actual * 3).reshape(
-                (num_eval_points, nx_actual, ny_actual, 3)
-            )
-            vel_mtx_indices = np.arange(num_eval_points * (nx - 1) * (ny - 1) * 3).reshape(
-                (num_eval_points, nx - 1, ny - 1, 3)
-            )
-            vel_mtx_idx_expanded = np.arange(num_eval_points * (nx - 1) * (ny - 1) * 3 * 3).reshape(
-                (num_eval_points, nx - 1, ny - 1, 3, 3)
-            )
-            aic_base = np.einsum("ijkl,m->ijklm", vel_mtx_indices, np.ones(3, int))
-            aic_len = np.sum(np.prod(aic_base.shape))
-
-            if ground_effect:
-                # mirrored surface along the x mesh direction
-                surfaces_to_compute = [vectors_indices[:, :nx, :], vectors_indices[:, nx:, :]]
-            else:
-                surfaces_to_compute = [vectors_indices[:, :, :]]
-
-            rows = np.array([], int)
-            cols = np.array([], int)
-
-            for surface_to_compute in surfaces_to_compute:
-                inds_A = surface_to_compute[:, 0:-1, 1:, :]
-                inds_B = surface_to_compute[:, 0:-1, 0:-1, :]
-                inds_C = surface_to_compute[:, 1:, 0:-1, :]
-                inds_D = surface_to_compute[:, 1:, 1:, :]
-                vertices_to_compute = [inds_A, inds_B, inds_C, inds_D]
-                # symmetric meshes end up with duplicated jacobian entries that need to be deleted later
-                # vertices A and D duplicate their last entries y-wise
-                # vertices B and C duplicate their first entries y-wise
-                jac_dup_sets = [1, 2, 2, 1]
-                for ivert, vertex_to_compute in enumerate(vertices_to_compute):
-                    jac_dup_set = jac_dup_sets[ivert]
-                    if surface["symmetry"]:
-                        rows = np.concatenate([rows, aic_base.flatten()])
-                        cols = np.concatenate(
-                            [
-                                cols,
-                                np.einsum(
-                                    "ijkm,l->ijklm", vertex_to_compute[:, :, : ny - 1, :], np.ones(3, int)
-                                ).flatten(),
-                            ]
-                        )
-                        if jac_dup_set == 1:
-                            duplicate_jac_entry_idx_set_1 = np.concatenate(
-                                [
-                                    duplicate_jac_entry_idx_set_1,
-                                    jac_start_ind_running_total + vel_mtx_idx_expanded[:, :, -1, :, :].flatten(),
-                                ]
-                            )
-                        jac_start_ind_running_total += aic_len
-
-                        rows = np.concatenate([rows, aic_base[:, :, ::-1, :].flatten()])
-                        cols = np.concatenate(
-                            [
-                                cols,
-                                np.einsum(
-                                    "ijkm,l->ijklm", vertex_to_compute[:, :, ny - 1 :, :], np.ones(3, int)
-                                ).flatten(),
-                            ]
-                        )
-                        if jac_dup_set == 2:
-                            duplicate_jac_entry_idx_set_2 = np.concatenate(
-                                [
-                                    duplicate_jac_entry_idx_set_2,
-                                    jac_start_ind_running_total + vel_mtx_idx_expanded[:, :, 0, :, :].flatten(),
-                                ]
-                            )
-                        jac_start_ind_running_total += aic_len
-
-                    else:
-                        rows = np.concatenate([rows, aic_base.flatten()])
-                        cols = np.concatenate(
-                            [cols, np.einsum("ijkm,l->ijklm", vertex_to_compute[:, :, :, :], np.ones(3, int)).flatten()]
-                        )
-
-            if surface["symmetry"]:
-                # need to determine the location of duplicate indices, knock them out, and save the locations for compute_partials
-                self.surface_indices_repeated[name] = [
-                    duplicate_jac_entry_idx_set_1.copy(),
-                    duplicate_jac_entry_idx_set_2.copy(),
-                ]
-
-                cols = np.delete(cols, duplicate_jac_entry_idx_set_2)
-                rows = np.delete(rows, duplicate_jac_entry_idx_set_2)
-
-                # If this is a right-hand symmetrical wing, we need to flip the "y" indexing
-                right_wing = abs(surface["mesh"][0, 0, 1]) < abs(surface["mesh"][0, -1, 1])
-                if right_wing:
-                    flipped_vel_mtx_indices = vel_mtx_indices[:, :, ::-1, :]
-                    flipped_rows = flipped_vel_mtx_indices.flatten()[rows]
-                    rows = flipped_rows
-
-            self.add_output(vel_mtx_name, shape=(num_eval_points, nx - 1, ny - 1, 3), units="1/m")
-
-            self.declare_partials(vel_mtx_name, vectors_name, rows=rows, cols=cols)
-
-            # It's worth the cs cost here because alpha is just a scalar
-            self.declare_partials(vel_mtx_name, "alpha", method="cs")
-            self.set_check_partial_options(wrt="alpha", method="fd")
-
-    def compute(self, inputs, outputs):
-        surfaces = self.options["surfaces"]
-        eval_name = self.options["eval_name"]
-        num_eval_points = self.options["num_eval_points"]
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        surfaces = self.surfaces
+        eval_name = self.eval_name
+        num_eval_points = self.num_eval_points
 
         for surface in surfaces:
             nx = surface["mesh"].shape[0]
@@ -398,9 +440,9 @@ class EvalVelMtx(om.ExplicitComponent):
                     outputs[vel_mtx_name] = outputs[vel_mtx_name][:, :, ::-1, :]
 
     def compute_partials(self, inputs, partials):
-        surfaces = self.options["surfaces"]
-        eval_name = self.options["eval_name"]
-        num_eval_points = self.options["num_eval_points"]
+        surfaces = self.surfaces
+        eval_name = self.eval_name
+        num_eval_points = self.num_eval_points
         for surface in surfaces:
             nx = surface["mesh"].shape[0]
             ny = surface["mesh"].shape[1]
@@ -485,7 +527,28 @@ class EvalVelMtx(om.ExplicitComponent):
 
             if surface["symmetry"]:
                 # now, need to check for duplicate entries and combine / delete
-                first_repeated_index, second_repeated_index = self.surface_indices_repeated[name]
+                first_repeated_index, second_repeated_index = self._repeated_indices[name]
                 assembled_derivs[first_repeated_index] += assembled_derivs[second_repeated_index].copy()
                 assembled_derivs = np.delete(assembled_derivs, second_repeated_index)
             partials[vel_mtx_name, vectors_name] = assembled_derivs
+
+            # d vel_mtx / d alpha: alpha enters only through the trailing (semi-infinite)
+            # vortices of the last row, so this mirrors that part of compute_outputs.
+            dcosa = -sina * np.pi / 180.0
+            dsina = cosa * np.pi / 180.0
+            u = np.einsum("ijk,l->ijkl", np.ones((num_eval_points, 1, ny_actual - 1)), np.array([cosa, 0, sina]))
+            du = np.einsum("ijk,l->ijkl", np.ones((num_eval_points, 1, ny_actual - 1)), np.array([dcosa, 0, dsina]))
+            dvel = np.zeros((num_eval_points, nx - 1, ny - 1, 3))
+            for i_surf, surface_to_compute in enumerate(surfaces_to_compute):
+                vortex_mult = vortex_mults[i_surf]
+                vert_D_last = surface_to_compute[:, 1:, 1:, :][:, -1:, :, :]
+                vert_C_last = surface_to_compute[:, 1:, 0:-1, :][:, -1:, :, :]
+                dres2 = _compute_semi_infinite_vortex_dalpha(u, du, vert_D_last)
+                dres3 = _compute_semi_infinite_vortex_dalpha(u, du, vert_C_last)
+                if surface["symmetry"]:
+                    dres2 = dres2[:, :, : ny - 1, :] + dres2[:, :, ny - 1 :, :][:, :, ::-1, :]
+                    dres3 = dres3[:, :, : ny - 1, :] + dres3[:, :, ny - 1 :, :][:, :, ::-1, :]
+                dvel[:, -1:, :, :] += vortex_mult * (-dres2 + dres3)
+            if surface["symmetry"] and abs(surface["mesh"][0, 0, 1]) < abs(surface["mesh"][0, -1, 1]):
+                dvel = dvel[:, :, ::-1, :]
+            partials[vel_mtx_name, "alpha"] = dvel.reshape((-1, 1))

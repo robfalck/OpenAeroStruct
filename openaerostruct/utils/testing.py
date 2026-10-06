@@ -1,29 +1,94 @@
-import openmdao.api as om
-
-from openmdao.utils.assert_utils import assert_check_partials
 import numpy as np
+
+import om4.api as om
+from om4.derivatives.complex_step import ComplexStep
+
 from openaerostruct.meshing.mesh_generator import generate_mesh
 
 
 def assert_opt_successful(test, optResult):
-    """Check whether an OpenMDAO optimization successfully converged
+    """Check whether an om4 optimization successfully converged
 
     Parameters
     ----------
     test : unittest.TestCase
         The test case that is being run
-    optResult :
-        Result returned by OpenMDAO's run_driver() method
+    optResult : OptimizerResult
+        Result returned by om4's Problem.run_optimizer()
     """
-    # In older versions of OpenMDAO, the run_driver() method returns a boolean that indicates whether the
-    # optimization failed, but in newer versions it returns an object that contains the optimization results,
-    # including a `success` attribute.
-    if isinstance(optResult, bool):
-        test.assertFalse(optResult)
-    else:
-        test.assertTrue(optResult.success)
+    test.assertIs(optResult.converged, True, msg=optResult.message)
 
 
+def assert_check_partials(results, atol=1e-5, rtol=1e-5):
+    """
+    Raise AssertionError if any subjac in om4 check_partials results exceeds tolerance.
+
+    om4 marks an entry wrong when ``|J - Jref| > atol + rtol * |Jref|`` element-wise.
+
+    Parameters
+    ----------
+    results : dict
+        ``{pathname: {(of, wrt): {"J", "Jref", "abs_error", "rel_error"}}}`` from
+        ``Problem.check_partials(only_incorrect=True, ...)``.
+    atol, rtol : float
+        Tolerances, only used in the failure message.
+    """
+    if not results:
+        return
+    lines = [f"Partials check failed (atol={atol}, rtol={rtol}):"]
+    for path, subjacs in results.items():
+        for (of, wrt), data in subjacs.items():
+            lines.append(f"  {path}: d({of})/d({wrt}) abs={data['abs_error']:.3e} rel={data['rel_error']:.3e}")
+    raise AssertionError("\n".join(lines))
+
+
+def dense_fd_partials(prob, comp_path="comp", step=1e-6):
+    """
+    Return the dense forward-difference Jacobian of an explicit component's outputs wrt its inputs.
+
+    om4's check_partials only compares within the declared sparsity pattern (see
+    ai/OM4_NEEDS.md), so it cannot see undeclared nonzeros.  This samples every input
+    entry by re-running the model, so it is only suitable for small unit-test models.
+
+    Returns
+    -------
+    dict
+        ``{(of, wrt): ndarray of shape (of.size, wrt.size)}``.
+    """
+    comp = prob.get_system(comp_path)
+    ins = {n: np.array(prob.get_val(f"{comp_path}.{n}"), dtype=float) for n in comp.inputs}
+    base = {n: np.array(prob.get_val(f"{comp_path}.{n}"), dtype=float).ravel() for n in comp.outputs}
+    jac = {(of, wrt): np.zeros((base[of].size, ins[wrt].size)) for of in comp.outputs for wrt in comp.inputs}
+    for wrt, val in ins.items():
+        flat = val.ravel()
+        for j in range(flat.size):
+            pert = flat.copy()
+            pert[j] += step
+            prob.set_val(f"{comp_path}.{wrt}", pert.reshape(val.shape))
+            prob.run_model()
+            for of in comp.outputs:
+                jac[of, wrt][:, j] = (np.ravel(prob.get_val(f"{comp_path}.{of}")) - base[of]) / step
+        prob.set_val(f"{comp_path}.{wrt}", val)
+    prob.run_model()
+    return jac
+
+
+def assert_sparsity_complete(test_obj, prob, comp_path="comp", step=1e-6, atol=1e-5, rtol=1e-4):
+    """
+    Assert that every nonzero of the dense FD Jacobian is covered by a declared, correct partial.
+
+    Complements om4's check_partials, which only compares inside the declared pattern.
+    """
+    results = prob.check_partials(only_incorrect=False, atol=atol, rtol=rtol).get(comp_path, {})
+    analytic = {key: np.asarray(data["J"]) for key, data in results.items()}
+    for key, j_fd in dense_fd_partials(prob, comp_path, step).items():
+        j_an = analytic.get(key, np.zeros_like(j_fd)).reshape(j_fd.shape)
+        bad = np.abs(j_an - j_fd) > atol + rtol * np.abs(j_fd)
+        test_obj.assertFalse(
+            np.any(bad),
+            msg=f"{comp_path}: d({key[0]})/d({key[1]}) differs from dense FD at {np.argwhere(bad)[:5].tolist()} "
+            f"(max |diff| {np.max(np.abs(j_an - j_fd)):.3e}); missing or wrong declared partials?",
+        )
 def view_mat(mat1, mat2=None, key="Title", tol=1e-10):  # pragma: no cover
     """
     Helper function used to visually examine matrices. It plots mat1 and mat2 side by side,
@@ -102,22 +167,29 @@ def run_test(
     view=False,
     reports=False,
 ):
-    prob = om.Problem(reports=reports)
-    prob.model.add_subsystem("comp", comp)
-    prob.setup(force_alloc_complex=complex_flag)
+    """
+    Wrap ``comp`` in a Problem, run it, and assert its partials against FD or CS.
 
+    ``complex_flag``, ``compact_print`` and ``reports`` are accepted for call-site
+    compatibility with the OM3 helper and are ignored: om4 allocates complex storage
+    locally at the CS node (no ``force_alloc_complex``) and has no reports system.
+    """
+    prob = om.Problem(model=om.Group(subsystems={"comp": comp}))
     prob.run_model()
 
     if method == "cs":
-        step = 1e-40
+        differentiator = ComplexStep()
+    else:
+        differentiator = om.FiniteDifference.forward(step=step)
 
-    check = prob.check_partials(compact_print=compact_print, method=method, step=step)
+    check = prob.check_partials(differentiator=differentiator, only_incorrect=not view, atol=atol, rtol=rtol)
 
     if view:
         # Loop through this `check` dictionary and visualize the approximated
         # and computed derivatives
-        for key, subjac in check[list(check.keys())[0]].items():
-            view_mat(subjac["J_fd"], subjac["J_fwd"], key)
+        for key, subjac in check.get("comp", {}).items():
+            view_mat(subjac["Jref"], subjac["J"], key)
+        check = prob.check_partials(differentiator=differentiator, only_incorrect=True, atol=atol, rtol=rtol)
 
     assert_check_partials(check, atol=atol, rtol=rtol)
 

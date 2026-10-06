@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openaerostruct"
+dynamic = ["version"]
+description = "OpenAeroStruct: low-fidelity aerostructural analysis and optimization on OpenMDAO 4"
+readme = "README.md"
+license = { file = "LICENSE.md" }
+requires-python = ">=3.12"
+dependencies = [
+    "om4",
+    "numpy>=1.21",
+    "scipy>=1.7",
+    "matplotlib",
+    "pydantic>=2,<3",
+]
+
+[project.optional-dependencies]
+test = ["testflo", "parameterized"]
+ffd = ["pygeo>=1.6.0"]
+
+[project.scripts]
+plot_wing = "openaerostruct.utils.plot_wing:disp_plot"
+plot_wingbox = "openaerostruct.utils.plot_wingbox:disp_plot"
+
+[tool.setuptools.dynamic]
+version = { attr = "openaerostruct.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["openaerostruct*"]
+namespaces = false

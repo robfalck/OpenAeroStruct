@@ -1,6 +1,14 @@
-import numpy as np
+from functools import cached_property
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values, vlm_system_size
+from openaerostruct.utils.surface import Surface
+
 
 
 class ConvertVelocity(om.ExplicitComponent):
@@ -30,15 +38,20 @@ class ConvertVelocity(om.ExplicitComponent):
         for all lifting surfaces.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
-        self.options.declare(
-            "rotational", False, types=bool, desc="Set to True to turn on support for computing angular velocities"
-        )
+    surfaces: list[Surface]
+    rotational: bool = False  # Turn on support for computing angular velocities
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
-        rotational = self.options["rotational"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
+        surfaces = f["surfaces"]
+        rotational = f["rotational"]
 
         system_size = 0
         sizes = []
@@ -53,28 +66,32 @@ class ConvertVelocity(om.ExplicitComponent):
             system_size += size
             sizes.append(size)
 
-        self.system_size = system_size
-
-        self.add_input("alpha", val=0.0, units="deg", tags=["mphys_input"])
-        self.add_input("beta", val=0.0, units="deg", tags=["mphys_input"])
-        self.add_input("v", val=1.0, units="m/s", tags=["mphys_input"])
+        d.add_input("alpha", val=0.0, units="deg", tags=["mphys_input"])
+        d.add_input("beta", val=0.0, units="deg", tags=["mphys_input"])
+        d.add_input("v", val=1.0, units="m/s", tags=["mphys_input"])
 
         if rotational:
-            self.add_input("rotational_velocities", shape=(system_size, 3), units="m/s")
+            d.add_input("rotational_velocities", shape=(system_size, 3), units="m/s")
 
-        self.add_output("freestream_velocities", shape=(system_size, 3), units="m/s")
+        d.add_output("freestream_velocities", shape=(system_size, 3), units="m/s")
 
-        self.declare_partials("freestream_velocities", "alpha")
-        self.declare_partials("freestream_velocities", "beta")
-        self.declare_partials("freestream_velocities", "v")
+        d.declare_partials("freestream_velocities", "alpha")
+        d.declare_partials("freestream_velocities", "beta")
+        d.declare_partials("freestream_velocities", "v")
 
         if rotational:
             nn = 3 * system_size
             row_col = np.arange(nn)
             val = np.ones((nn,))
-            self.declare_partials("freestream_velocities", "rotational_velocities", rows=row_col, cols=row_col, val=val)
+            d.declare_partials("freestream_velocities", "rotational_velocities", rows=row_col, cols=row_col, val=val)
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
+    @cached_property
+    def system_size(self) -> int:
+        """Total number of VLM panels over all surfaces."""
+        return vlm_system_size(self.surfaces)
+
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         # Rotate the freestream velocities based on the angle of attack and the sideslip angle.
         alpha = inputs["alpha"][0] * np.pi / 180.0
         beta = inputs["beta"][0] * np.pi / 180.0
@@ -87,7 +104,7 @@ class ConvertVelocity(om.ExplicitComponent):
         v_inf = inputs["v"][0] * np.array([cosa * cosb, -sinb, sina * cosb])
         outputs["freestream_velocities"][:, :] = v_inf
 
-        if self.options["rotational"]:
+        if self.rotational:
             outputs["freestream_velocities"][:, :] += inputs["rotational_velocities"]
 
     def compute_partials(self, inputs, J):

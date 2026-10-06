@@ -1,7 +1,56 @@
+from functools import cached_property
+from typing import Any
+
 import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values, vlm_system_size
+from openaerostruct.utils.surface import Surface
 from scipy.sparse import csc_matrix
 
-import openmdao.api as om
+
+
+def _horseshoe_coo(surfaces):
+    """COO entries of the linear map from vortex-ring to horseshoe circulations."""
+    system_size = vlm_system_size(surfaces)
+
+    # To convert between the two circulations, we simply need to set up a
+    # matrix that linearly transforms the vortex ring circulations to
+    # the horseshoe circulations. Again, because this is a linear
+    # transformation, the derivatives are in fact the matrix itself.
+    data = [np.ones(system_size)]
+    rows = [np.arange(system_size)]
+    cols = [np.arange(system_size)]
+
+    ind_1 = 0
+    ind_2 = 0
+    for surface in surfaces:
+        mesh = surface["mesh"]
+        nx = mesh.shape[0]
+        ny = mesh.shape[1]
+        num = (nx - 1) * (ny - 1)
+
+        ind_2 += num
+
+        arange = np.arange(num).reshape((nx - 1), (ny - 1))
+
+        data_ = -np.ones((nx - 2) * (ny - 1))
+        rows_ = ind_1 + arange[1:, :].flatten()
+        cols_ = ind_1 + arange[:-1, :].flatten()
+
+        data.append(data_)
+        rows.append(rows_)
+        cols.append(cols_)
+
+        ind_1 += num
+
+    data = np.concatenate(data)
+    rows = np.concatenate(rows)
+    cols = np.concatenate(cols)
+
+    return data, rows, cols
 
 
 class HorseshoeCirculations(om.ExplicitComponent):
@@ -26,11 +75,18 @@ class HorseshoeCirculations(om.ExplicitComponent):
         the vortex ring circulations, accounting for overlaps between rings.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
+    surfaces: list[Surface]
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
+        surfaces = f["surfaces"]
 
         system_size = 0
 
@@ -43,49 +99,20 @@ class HorseshoeCirculations(om.ExplicitComponent):
 
             system_size += (nx - 1) * (ny - 1)
 
-        self.system_size = system_size
+        d.add_input("circulations", shape=system_size, units="m**2/s", tags=["mphys_coupling"])
+        d.add_output("horseshoe_circulations", shape=system_size, units="m**2/s")
 
-        self.add_input("circulations", shape=system_size, units="m**2/s", tags=["mphys_coupling"])
-        self.add_output("horseshoe_circulations", shape=system_size, units="m**2/s")
+        data, rows, cols = _horseshoe_coo(surfaces)
 
-        # To convert between the two circulations, we simply need to set up a
-        # matrix that linearly transforms the vortex ring circulations to
-        # the horseshoe circulations. Again, because this is a linear
-        # transformation, the derivatives are in fact the matrix itself.
-        data = [np.ones(system_size)]
-        rows = [np.arange(system_size)]
-        cols = [np.arange(system_size)]
+        d.declare_partials("horseshoe_circulations", "circulations", val=data, rows=rows, cols=cols)
+        return d.into(_spec)
 
-        ind_1 = 0
-        ind_2 = 0
-        for surface in surfaces:
-            mesh = surface["mesh"]
-            nx = mesh.shape[0]
-            ny = mesh.shape[1]
-            num = (nx - 1) * (ny - 1)
+    @cached_property
+    def _mtx(self):
+        """Sparse vortex-ring -> horseshoe circulation map (constant)."""
+        size = vlm_system_size(self.surfaces)
+        data, rows, cols = _horseshoe_coo(self.surfaces)
+        return csc_matrix((data, (rows, cols)), shape=(size, size))
 
-            ind_2 += num
-
-            arange = np.arange(num).reshape((nx - 1), (ny - 1))
-
-            data_ = -np.ones((nx - 2) * (ny - 1))
-            rows_ = ind_1 + arange[1:, :].flatten()
-            cols_ = ind_1 + arange[:-1, :].flatten()
-
-            data.append(data_)
-            rows.append(rows_)
-            cols.append(cols_)
-
-            ind_1 += num
-
-        data = np.concatenate(data)
-        rows = np.concatenate(rows)
-        cols = np.concatenate(cols)
-
-        # Actually create the sparse matrix based on these rows and cols
-        self.mtx = csc_matrix((data, (rows, cols)), shape=(system_size, system_size))
-
-        self.declare_partials("horseshoe_circulations", "circulations", val=data, rows=rows, cols=cols)
-
-    def compute(self, inputs, outputs):
-        outputs["horseshoe_circulations"] = self.mtx.dot(inputs["circulations"])
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        outputs["horseshoe_circulations"] = self._mtx.dot(inputs["circulations"])

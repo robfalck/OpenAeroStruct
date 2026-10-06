@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class CollocationPoints(om.ExplicitComponent):
@@ -38,30 +44,37 @@ class CollocationPoints(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
+    surfaces: list[Surface]
 
-    def setup(self):
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
         num_eval_points = 0
 
         # Loop through all the surfaces to determine the total number
         # of evaluation points.
-        for surface in self.options["surfaces"]:
+        for surface in f["surfaces"]:
             mesh = surface["mesh"]
             nx = mesh.shape[0]
             ny = mesh.shape[1]
 
             num_eval_points += (nx - 1) * (ny - 1)
 
-        self.add_output("coll_pts", shape=(num_eval_points, 3), units="m")
-        self.add_output("force_pts", shape=(num_eval_points, 3), units="m")
-        self.add_output("bound_vecs", shape=(num_eval_points, 3), units="m")
+        d.add_output("coll_pts", shape=(num_eval_points, 3), units="m")
+        d.add_output("force_pts", shape=(num_eval_points, 3), units="m")
+        d.add_output("bound_vecs", shape=(num_eval_points, 3), units="m")
 
         eval_indices = np.arange(num_eval_points * 3).reshape((num_eval_points, 3))
 
         ind_eval_points_1 = 0
         ind_eval_points_2 = 0
-        for surface in self.options["surfaces"]:
+        for surface in f["surfaces"]:
             mesh = surface["mesh"]
             nx = mesh.shape[0]
             ny = mesh.shape[1]
@@ -72,7 +85,7 @@ class CollocationPoints(om.ExplicitComponent):
 
             # Take in a deformed mesh for each surface.
             mesh_name = name + "_def_mesh"
-            self.add_input(mesh_name, shape=(nx, ny, 3), units="m", tags=["mphys_coupling"])
+            d.add_input(mesh_name, shape=(nx, ny, 3), units="m", tags=["mphys_coupling"])
 
             mesh_indices = np.arange(nx * ny * 3).reshape((nx, ny, 3))
 
@@ -95,7 +108,7 @@ class CollocationPoints(om.ExplicitComponent):
                     0.75 * 0.5 * np.ones((nx - 1) * (ny - 1) * 3),  # BL
                 ]
             )
-            self.declare_partials("coll_pts", mesh_name, val=data, rows=rows, cols=cols)
+            d.declare_partials("coll_pts", mesh_name, val=data, rows=rows, cols=cols)
 
             # Compute the Jacobian for `force_pts` wrt the meshes.
             # These do not change; the Jacobian is linear.
@@ -107,7 +120,7 @@ class CollocationPoints(om.ExplicitComponent):
                     0.25 * 0.5 * np.ones((nx - 1) * (ny - 1) * 3),  # BL
                 ]
             )
-            self.declare_partials("force_pts", mesh_name, val=data, rows=rows, cols=cols)
+            d.declare_partials("force_pts", mesh_name, val=data, rows=rows, cols=cols)
 
             # Compute the Jacobian for `bound_vecs` wrt the meshes.
             # These do not change; the Jacobian is linear.
@@ -119,18 +132,19 @@ class CollocationPoints(om.ExplicitComponent):
                     -0.25 * np.ones((nx - 1) * (ny - 1) * 3),  # BL
                 ]
             )
-            self.declare_partials("bound_vecs", mesh_name, val=data, rows=rows, cols=cols)
+            d.declare_partials("bound_vecs", mesh_name, val=data, rows=rows, cols=cols)
 
             ind_eval_points_1 += (nx - 1) * (ny - 1)
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         ind_eval_points_1 = 0
         ind_eval_points_2 = 0
 
         # Loop through each surface and compute the corresponding outputs,
         # paying special attention to the total number of evaluation points
         # in the system and each surface's place within the final arrays.
-        for surface in self.options["surfaces"]:
+        for surface in self.surfaces:
             mesh = surface["mesh"]
             nx = mesh.shape[0]
             ny = mesh.shape[1]

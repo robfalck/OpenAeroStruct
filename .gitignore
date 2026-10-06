@@ -28,3 +28,8 @@ src/adjoint/tempForward/
 openaerostruct.egg-info/
 .vscode
 *.plt
+
+.pixi/
+*.egg-info/
+reports/
+*_out/

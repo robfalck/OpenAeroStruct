@@ -1,6 +1,71 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import field_values
+from openaerostruct.utils.surface import Surface
+
+_COUPLING = {"mphys_coupling"}
+
+
+def _vlm_geometry_partials(nx, ny):
+    """Sparsity of VLMGeometry's partials wrt def_mesh, in the OM3 declaration order."""
+    partials = []
+
+    # b_pts
+    size = (nx - 1) * ny * 3
+    base = np.arange(size)
+    rows = np.tile(base, 2)
+    cols = rows + np.repeat([0, ny * 3], len(base))
+    val = np.empty((2 * size,))
+    val[:size] = 0.75
+    val[size:] = 0.25
+    partials.append(om.PartialsSpec(of="b_pts", wrt="def_mesh", rows=rows, cols=cols, val=val))
+
+    # width
+    size = ny - 1
+    base = np.arange(size)
+    rows = np.tile(base, 8)
+    col = np.tile(3 * base, 4) + np.repeat([1, 2, 4, 5], len(base))
+    cols = np.tile(col, 2) + np.repeat([0, (nx - 1) * ny * 3], len(col))
+    partials.append(om.PartialsSpec(of="widths", wrt="def_mesh", rows=rows, cols=cols))
+
+    # length of panel in spanwise direction with sweep
+    rows = np.tile(base, 12)
+    col = np.tile(3 * base, 6) + np.repeat(np.arange(6), len(base))
+    cols = np.tile(col, 2) + np.repeat([0, (nx - 1) * ny * 3], len(col))
+    partials.append(om.PartialsSpec(of="lengths_spanwise", wrt="def_mesh", rows=rows, cols=cols))
+
+    # lengths
+    size = ny
+    base = np.arange(size)
+    rows = np.tile(base, nx * 3)
+    col = np.tile(3 * base, 3) + np.repeat(np.arange(3), len(base))
+    cols = np.tile(col, nx) + np.repeat(3 * ny * np.arange(nx), len(col))
+    partials.append(om.PartialsSpec(of="lengths", wrt="def_mesh", rows=rows, cols=cols))
+
+    # chords
+    rows = np.tile(base, 6)
+    col = np.tile(3 * base, 3) + np.repeat(np.arange(3), len(base))
+    cols = np.tile(col, 2) + np.repeat([0, (nx - 1) * ny * 3], len(col))
+    partials.append(om.PartialsSpec(of="chords", wrt="def_mesh", rows=rows, cols=cols))
+
+    # normals
+    size = (ny - 1) * (nx - 1) * 3
+    row = np.tile(np.arange(size).reshape((size, 1)), 3).flatten()
+    rows = np.tile(row, 4)
+    base = np.tile(np.arange(3), size) + np.repeat(3 * np.arange(size // 3), 9)
+    base += np.repeat(3 * np.arange(nx - 1), 9 * (ny - 1))
+    cols = np.concatenate([base + 3, base + ny * 3, base, base + (ny + 1) * 3])
+    partials.append(om.PartialsSpec(of="normals", wrt="def_mesh", rows=rows, cols=cols))
+
+    # All parts of the mesh influence the area, so it's fully dense
+    partials.append(om.PartialsSpec(of="S_ref", wrt="def_mesh"))
+    return partials
+
 
 
 class VLMGeometry(om.ExplicitComponent):
@@ -37,84 +102,33 @@ class VLMGeometry(om.ExplicitComponent):
         The reference area of the lifting surface.
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
-
-        mesh = surface["mesh"]
-        nx = self.nx = mesh.shape[0]
-        ny = self.ny = mesh.shape[1]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        surface = field_values(cls, data).surface
+        nx, ny = surface.mesh.shape[:2]
 
         # All of these computations only need the deformed mesh
-        self.add_input("def_mesh", val=np.zeros((nx, ny, 3)), units="m", tags=["mphys_coupling"])
+        data["inputs"] = {"def_mesh": om.InputVar(val=np.zeros((nx, ny, 3)), units="m", tags=_COUPLING)}
 
         rng = np.random.default_rng(314)
-        self.add_output("b_pts", val=rng.random((nx - 1, ny, 3)), units="m", tags=["mphys_coupling"])
-        self.add_output("widths", val=np.ones((ny - 1)), units="m", tags=["mphys_coupling"])
-        self.add_output("lengths_spanwise", val=np.ones((ny - 1)), units="m", tags=["mphys_coupling"])
-        self.add_output("lengths", val=np.zeros((ny)), units="m", tags=["mphys_coupling"])
-        self.add_output("chords", val=np.zeros((ny)), units="m", tags=["mphys_coupling"])
-        self.add_output("normals", val=np.zeros((nx - 1, ny - 1, 3)), tags=["mphys_coupling"])
-        self.add_output("S_ref", val=1.0, units="m**2", tags=["mphys_coupling"])
+        data["outputs"] = {
+            "b_pts": om.OutputVar(val=rng.random((nx - 1, ny, 3)), units="m", tags=_COUPLING),
+            "widths": om.OutputVar(val=np.ones((ny - 1)), units="m", tags=_COUPLING),
+            "lengths_spanwise": om.OutputVar(val=np.ones((ny - 1)), units="m", tags=_COUPLING),
+            "lengths": om.OutputVar(val=np.zeros((ny)), units="m", tags=_COUPLING),
+            "chords": om.OutputVar(val=np.zeros((ny)), units="m", tags=_COUPLING),
+            "normals": om.OutputVar(val=np.zeros((nx - 1, ny - 1, 3)), units=None, tags=_COUPLING),
+            "S_ref": om.OutputVar(val=np.ones(1), units="m**2", tags=_COUPLING),
+        }
+        data["partials"] = _vlm_geometry_partials(nx, ny)
+        return data
 
-        # Next up we have a lot of rows and cols settings for the sparse
-        # Jacobians. Each set of partials needs a different rows/cols setup
-
-        # b_pts
-        size = (nx - 1) * ny * 3
-        base = np.arange(size)
-        rows = np.tile(base, 2)
-        cols = rows + np.repeat([0, ny * 3], len(base))
-        val = np.empty((2 * size,))
-        val[:size] = 0.75
-        val[size:] = 0.25
-        self.declare_partials("b_pts", "def_mesh", rows=rows, cols=cols, val=val)
-
-        # width
-        size = ny - 1
-        base = np.arange(size)
-        rows = np.tile(base, 8)
-        col = np.tile(3 * base, 4) + np.repeat([1, 2, 4, 5], len(base))
-        cols = np.tile(col, 2) + np.repeat([0, (nx - 1) * ny * 3], len(col))
-        self.declare_partials("widths", "def_mesh", rows=rows, cols=cols)
-
-        # length of panel in spanwise direction with sweep
-        rows = np.tile(base, 12)
-        col = np.tile(3 * base, 6) + np.repeat(np.arange(6), len(base))
-        cols = np.tile(col, 2) + np.repeat([0, (nx - 1) * ny * 3], len(col))
-        self.declare_partials("lengths_spanwise", "def_mesh", rows=rows, cols=cols)
-
-        # lengths
-        size = ny
-        base = np.arange(size)
-        rows = np.tile(base, nx * 3)
-        col = np.tile(3 * base, 3) + np.repeat(np.arange(3), len(base))
-        cols = np.tile(col, nx) + np.repeat(3 * ny * np.arange(nx), len(col))
-        self.declare_partials("lengths", "def_mesh", rows=rows, cols=cols)
-
-        # chords
-        rows = np.tile(base, 6)
-        col = np.tile(3 * base, 3) + np.repeat(np.arange(3), len(base))
-        cols = np.tile(col, 2) + np.repeat([0, (nx - 1) * ny * 3], len(col))
-        self.declare_partials("chords", "def_mesh", rows=rows, cols=cols)
-
-        # normals
-        size = (ny - 1) * (nx - 1) * 3
-        row = np.tile(np.arange(size).reshape((size, 1)), 3).flatten()
-        rows = np.tile(row, 4)
-        base = np.tile(np.arange(3), size) + np.repeat(3 * np.arange(size // 3), 9)
-        base += np.repeat(3 * np.arange(nx - 1), 9 * (ny - 1))
-        cols = np.concatenate([base + 3, base + ny * 3, base, base + (ny + 1) * 3])
-        self.declare_partials("normals", "def_mesh", rows=rows, cols=cols)
-
-        # And here actually all parts of the mesh influence the area, so it's
-        # fully dense
-        self.declare_partials("S_ref", "def_mesh")
-        self.set_check_partial_options(wrt="def_mesh", method="fd", step=1e-6)
-
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         mesh = inputs["def_mesh"]
 
         # Compute the bound points at quarter-chord
@@ -181,9 +195,8 @@ class VLMGeometry(om.ExplicitComponent):
     def compute_partials(self, inputs, partials):
         """Jacobian for VLM geometry."""
 
-        nx = self.nx
-        ny = self.ny
         mesh = inputs["def_mesh"]
+        nx, ny = mesh.shape[:2]
 
         # Compute the length of the quarter-chord line of each panels
         quarter_chord = 0.25 * mesh[-1] + 0.75 * mesh[0]
@@ -198,14 +211,15 @@ class VLMGeometry(om.ExplicitComponent):
         d1 = delta[1:, :] / widths
         partials["widths", "def_mesh"] = np.outer([-0.75, 0.75, -0.25, 0.25], d1.flatten()).flatten()
 
-        partials["lengths", "def_mesh"][:] = 0.0
         dmesh = np.diff(mesh, axis=0)
         length = np.sqrt(np.sum(dmesh**2, axis=2))
         dmesh = dmesh / length[:, :, np.newaxis]
         derivs = np.transpose(dmesh, axes=[0, 2, 1]).flatten()
         nn = len(derivs)
-        partials["lengths", "def_mesh"][:nn] -= derivs
-        partials["lengths", "def_mesh"][-nn:] += derivs
+        d_lengths = np.zeros(nx * ny * 3)
+        d_lengths[:nn] -= derivs
+        d_lengths[-nn:] += derivs
+        partials["lengths", "def_mesh"] = d_lengths
 
         dfullmesh = mesh[0, :] - mesh[-1, :]
         length = np.sqrt(np.sum(dfullmesh**2, axis=1))
@@ -287,21 +301,24 @@ class VLMGeometry(om.ExplicitComponent):
         nn = (nx - 1) * (ny - 1) * 9
         dfda_flat = dfda.flatten()
         dfdb_flat = dfdb.flatten()
-        partials["normals", "def_mesh"][:nn] = dfda_flat
-        partials["normals", "def_mesh"][nn : 2 * nn] = -dfda_flat
-        partials["normals", "def_mesh"][2 * nn : 3 * nn] = dfdb_flat
-        partials["normals", "def_mesh"][3 * nn : 4 * nn] = -dfdb_flat
+        d_normals = np.empty(4 * nn)
+        d_normals[:nn] = dfda_flat
+        d_normals[nn : 2 * nn] = -dfda_flat
+        d_normals[2 * nn : 3 * nn] = dfdb_flat
+        d_normals[3 * nn : 4 * nn] = -dfdb_flat
+        partials["normals", "def_mesh"] = d_normals
 
         # At this point, same calculation for wetted and projected surface.
         dsda_flat = 0.5 * dsda.flatten()
         dsdb_flat = 0.5 * dsdb.flatten()
         idx = np.arange((nx - 1) * (ny - 1) * 3) + np.repeat(3 * np.arange(nx - 1), 3 * (ny - 1))
-        partials["S_ref", "def_mesh"][:] = 0.0
-        partials["S_ref", "def_mesh"][:, idx + 3] += dsda_flat
-        partials["S_ref", "def_mesh"][:, idx + ny * 3] -= dsda_flat
-        partials["S_ref", "def_mesh"][:, idx] += dsdb_flat
-        partials["S_ref", "def_mesh"][:, idx + (ny + 1) * 3] -= dsdb_flat
+        d_sref = np.zeros((1, nx * ny * 3))
+        d_sref[:, idx + 3] += dsda_flat
+        d_sref[:, idx + ny * 3] -= dsda_flat
+        d_sref[:, idx] += dsdb_flat
+        d_sref[:, idx + (ny + 1) * 3] -= dsdb_flat
 
         # Multiply the surface area by 2 if symmetric to get consistent area measures
         if self.surface["symmetry"]:
-            partials["S_ref", "def_mesh"] *= 2.0
+            d_sref *= 2.0
+        partials["S_ref", "def_mesh"] = d_sref

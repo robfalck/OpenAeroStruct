@@ -1,6 +1,14 @@
-import numpy as np
+from functools import cached_property
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values, vlm_system_size
+from openaerostruct.utils.surface import Surface
+
 
 
 class VLMMtxRHSComp(om.ExplicitComponent):
@@ -34,11 +42,18 @@ class VLMMtxRHSComp(om.ExplicitComponent):
         freestream velocities and panel normals.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
+    surfaces: list[Surface]
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
+        surfaces = f["surfaces"]
 
         system_size = 0
 
@@ -50,18 +65,16 @@ class VLMMtxRHSComp(om.ExplicitComponent):
             ny = mesh.shape[1]
             system_size += (nx - 1) * (ny - 1)
 
-        self.system_size = system_size
-
-        self.add_input("freestream_velocities", shape=(system_size, 3), units="m/s")
-        self.add_output("mtx", shape=(system_size, system_size), units="1/m")
-        self.add_output("rhs", shape=system_size, units="m/s")
+        d.add_input("freestream_velocities", shape=(system_size, 3), units="m/s")
+        d.add_output("mtx", shape=(system_size, system_size), units="1/m")
+        d.add_output("rhs", shape=system_size, units="m/s")
 
         # Set up indicies arrays for sparse Jacobians
         vel_indices = np.arange(system_size * 3).reshape((system_size, 3))
         mtx_indices = np.arange(system_size * system_size).reshape((system_size, system_size))
         rhs_indices = np.arange(system_size)
 
-        self.declare_partials(
+        d.declare_partials(
             "rhs",
             "freestream_velocities",
             rows=np.einsum("i,j->ij", rhs_indices, np.ones(3, int)).flatten(),
@@ -90,26 +103,26 @@ class VLMMtxRHSComp(om.ExplicitComponent):
             vel_mtx_name = "{}_{}_vel_mtx".format(name, "coll_pts")
             normals_name = "{}_normals".format(name)
 
-            self.add_input(vel_mtx_name, shape=(system_size, nx - 1, ny - 1, 3), units="1/m")
-            self.add_input(normals_name, shape=(nx - 1, ny - 1, 3))
+            d.add_input(vel_mtx_name, shape=(system_size, nx - 1, ny - 1, 3), units="1/m")
+            d.add_input(normals_name, shape=(nx - 1, ny - 1, 3))
 
             velocities_indices = np.arange(system_size * num * 3).reshape((system_size, nx - 1, ny - 1, 3))
             normals_indices = np.arange(num * 3).reshape((num, 3))
 
             # Declare each set of partials based on the indices, ind_1 and ind_2
-            self.declare_partials(
+            d.declare_partials(
                 "mtx",
                 vel_mtx_name,
                 rows=np.einsum("ij,k->ijk", mtx_indices[:, ind_1:ind_2], np.ones(3, int)).flatten(),
                 cols=velocities_indices.flatten(),
             )
-            self.declare_partials(
+            d.declare_partials(
                 "mtx",
                 normals_name,
                 rows=np.einsum("ij,k->ijk", mtx_indices[ind_1:ind_2, :], np.ones(3, int)).flatten(),
                 cols=np.einsum("ik,j->ijk", normals_indices, np.ones(system_size, int)).flatten(),
             )
-            self.declare_partials(
+            d.declare_partials(
                 "rhs",
                 normals_name,
                 rows=np.outer(rhs_indices[ind_1:ind_2], np.ones(3, int)).flatten(),
@@ -118,14 +131,25 @@ class VLMMtxRHSComp(om.ExplicitComponent):
 
             ind_1 += num
 
-        self.mtx_n_n_3 = np.zeros((system_size, system_size, 3))
-        self.normals_n_3 = np.zeros((system_size, 3))
-        self.set_check_partial_options(wrt="*", method="fd", step=1e-5)
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
-        surfaces = self.options["surfaces"]
+    @cached_property
+    def system_size(self) -> int:
+        """Total number of VLM panels over all surfaces."""
+        return vlm_system_size(self.surfaces)
+
+    def _assemble(self, inputs):
+        """
+        Stack every surface's vel_mtx and normals into system-sized arrays.
+
+        OM3 kept these as instance scratch arrays filled in compute and read back in
+        compute_partials; recomputing them removes that dependence on call order.
+        """
+        surfaces = self.surfaces
 
         system_size = self.system_size
+        mtx_n_n_3 = np.zeros((system_size, system_size, 3))
+        normals_n_3 = np.zeros((system_size, 3))
 
         ind_1 = 0
         ind_2 = 0
@@ -143,18 +167,24 @@ class VLMMtxRHSComp(om.ExplicitComponent):
             # Construct the full matrix and all of the lifting surfaces
             # together
             # TODO: This is not complex-safe
-            self.mtx_n_n_3[:, ind_1:ind_2, :] = inputs[vel_mtx_name].reshape((system_size, num, 3))
-            self.normals_n_3[ind_1:ind_2, :] = inputs[normals_name].reshape((num, 3))
+            mtx_n_n_3[:, ind_1:ind_2, :] = inputs[vel_mtx_name].reshape((system_size, num, 3))
+            normals_n_3[ind_1:ind_2, :] = inputs[normals_name].reshape((num, 3))
 
             ind_1 += num
 
+        return mtx_n_n_3, normals_n_3
+
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        mtx_n_n_3, normals_n_3 = self._assemble(inputs)
+
         # Actually obtain the final matrix by multiplying through with the
         # normals. Also create the rhs based on v dot n.
-        outputs["mtx"] = np.einsum("ijk,ik->ij", self.mtx_n_n_3, self.normals_n_3)
-        outputs["rhs"] = -np.einsum("ij,ij->i", inputs["freestream_velocities"], self.normals_n_3)
+        outputs["mtx"] = np.einsum("ijk,ik->ij", mtx_n_n_3, normals_n_3)
+        outputs["rhs"] = -np.einsum("ij,ij->i", inputs["freestream_velocities"], normals_n_3)
 
     def compute_partials(self, inputs, partials):
-        surfaces = self.options["surfaces"]
+        surfaces = self.surfaces
+        mtx_n_n_3, normals_n_3 = self._assemble(inputs)
 
         system_size = self.system_size
 
@@ -174,13 +204,13 @@ class VLMMtxRHSComp(om.ExplicitComponent):
             partials["mtx", vel_mtx_name] = np.einsum(
                 "ijk,ik->ijk",
                 np.ones((system_size, num, 3)),
-                self.normals_n_3,
+                normals_n_3,
             ).flatten()
 
-            partials["mtx", normals_name] = self.mtx_n_n_3[ind_1:ind_2, :, :].flatten()
+            partials["mtx", normals_name] = mtx_n_n_3[ind_1:ind_2, :, :].flatten()
 
             partials["rhs", normals_name] = -inputs["freestream_velocities"][ind_1:ind_2, :].flatten()
 
             ind_1 += num
 
-        partials["rhs", "freestream_velocities"] = -self.normals_n_3.flatten()
+        partials["rhs", "freestream_velocities"] = -normals_n_3.flatten()

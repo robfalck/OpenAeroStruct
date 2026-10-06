@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class GetVectors(om.ExplicitComponent):
@@ -27,18 +33,25 @@ class GetVectors(om.ExplicitComponent):
         velocities and the induced velocities caused by the circulations.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
-        self.options.declare("num_eval_points", types=int)
-        self.options.declare("eval_name", types=str)
+    surfaces: list[Surface]
+    num_eval_points: int
+    eval_name: str
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
-        num_eval_points = self.options["num_eval_points"]
-        eval_name = self.options["eval_name"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
+        surfaces = f["surfaces"]
+        num_eval_points = f["num_eval_points"]
+        eval_name = f["eval_name"]
 
         # Take in the evaluation points
-        self.add_input(eval_name, val=np.zeros((num_eval_points, 3)), units="m")
+        d.add_input(eval_name, val=np.zeros((num_eval_points, 3)), units="m")
 
         for surface in surfaces:
             mesh = surface["mesh"]
@@ -64,8 +77,8 @@ class GetVectors(om.ExplicitComponent):
             else:
                 actual_nx_size = nx
 
-            self.add_input(name + "_vortex_mesh", val=np.zeros((actual_nx_size, actual_ny_size, 3)), units="m")
-            self.add_output(vectors_name, val=np.ones((num_eval_points, actual_nx_size, actual_ny_size, 3)), units="m")
+            d.add_input(name + "_vortex_mesh", val=np.zeros((actual_nx_size, actual_ny_size, 3)), units="m")
+            d.add_output(vectors_name, val=np.ones((num_eval_points, actual_nx_size, actual_ny_size, 3)), units="m")
 
             # Set up indices so we can get the rows and cols for the delcare
             vector_indices = np.arange(num_eval_points * actual_nx_size * actual_ny_size * 3)
@@ -79,13 +92,14 @@ class GetVectors(om.ExplicitComponent):
                 np.ones((actual_nx_size, actual_ny_size), int),
             ).flatten()
 
-            self.declare_partials(vectors_name, name + "_vortex_mesh", val=-1.0, rows=vector_indices, cols=mesh_indices)
-            self.declare_partials(vectors_name, eval_name, val=1.0, rows=vector_indices, cols=eval_indices)
+            d.declare_partials(vectors_name, name + "_vortex_mesh", val=-1.0, rows=vector_indices, cols=mesh_indices)
+            d.declare_partials(vectors_name, eval_name, val=1.0, rows=vector_indices, cols=eval_indices)
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
-        surfaces = self.options["surfaces"]
-        num_eval_points = self.options["num_eval_points"]
-        eval_name = self.options["eval_name"]
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        surfaces = self.surfaces
+        num_eval_points = self.num_eval_points
+        eval_name = self.eval_name
 
         # At the end of the day, all this component is doing is computing
         # vectors that go from the mesh to the evaluation points. We have

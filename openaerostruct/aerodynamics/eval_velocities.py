@@ -1,6 +1,14 @@
-import numpy as np
+from functools import cached_property
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values, vlm_system_size
+from openaerostruct.utils.surface import Surface
+
 
 
 class EvalVelocities(om.ExplicitComponent):
@@ -33,15 +41,22 @@ class EvalVelocities(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
-        self.options.declare("eval_name", types=str)
-        self.options.declare("num_eval_points", types=int)
+    surfaces: list[Surface]
+    eval_name: str
+    num_eval_points: int
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
-        eval_name = self.options["eval_name"]
-        num_eval_points = self.options["num_eval_points"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
+        surfaces = f["surfaces"]
+        eval_name = f["eval_name"]
+        num_eval_points = f["num_eval_points"]
 
         system_size = 0
 
@@ -53,21 +68,19 @@ class EvalVelocities(om.ExplicitComponent):
             ny = mesh.shape[1]
             system_size += (nx - 1) * (ny - 1)
 
-        self.system_size = system_size
-
-        self.add_input("freestream_velocities", shape=(system_size, 3), units="m/s")
-        self.add_input("circulations", shape=system_size, units="m**2/s", tags=["mphys_coupling"])
+        d.add_input("freestream_velocities", shape=(system_size, 3), units="m/s")
+        d.add_input("circulations", shape=system_size, units="m**2/s", tags=["mphys_coupling"])
 
         # Get the correct output name; the velocities output depends on which
         # set of evaluation points we use, either collocation or force.
         velocities_name = "{}_velocities".format(eval_name)
-        self.add_output(velocities_name, shape=(num_eval_points, 3), units="m/s")
+        d.add_output(velocities_name, shape=(num_eval_points, 3), units="m/s")
 
         # Set up indices to create the sparsity pattern for the derivatives.
         circulations_indices = np.arange(system_size)
         velocities_indices = np.arange(num_eval_points * 3).reshape((num_eval_points, 3))
 
-        self.declare_partials(
+        d.declare_partials(
             velocities_name,
             "circulations",
             rows=np.einsum("ik,j->ijk", velocities_indices, np.ones(system_size, int)).flatten(),
@@ -75,7 +88,7 @@ class EvalVelocities(om.ExplicitComponent):
         )
 
         # These derivatives are linear and don't change so we set the val here
-        self.declare_partials(
+        d.declare_partials(
             velocities_name,
             "freestream_velocities",
             val=1.0,
@@ -99,11 +112,11 @@ class EvalVelocities(om.ExplicitComponent):
 
             vel_mtx_name = "{}_{}_vel_mtx".format(name, eval_name)
 
-            self.add_input(vel_mtx_name, shape=(num_eval_points, nx - 1, ny - 1, 3), units="1/m")
+            d.add_input(vel_mtx_name, shape=(num_eval_points, nx - 1, ny - 1, 3), units="1/m")
 
             vel_mtx_indices = np.arange(num_eval_points * num * 3).reshape((num_eval_points, num, 3))
 
-            self.declare_partials(
+            d.declare_partials(
                 velocities_name,
                 vel_mtx_name,
                 rows=np.einsum("ik,j->ijk", velocities_indices, np.ones(num, int)).flatten(),
@@ -111,11 +124,17 @@ class EvalVelocities(om.ExplicitComponent):
             )
 
             ind_1 += num
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
-        surfaces = self.options["surfaces"]
-        eval_name = self.options["eval_name"]
-        num_eval_points = self.options["num_eval_points"]
+    @cached_property
+    def system_size(self) -> int:
+        """Total number of VLM panels over all surfaces."""
+        return vlm_system_size(self.surfaces)
+
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        surfaces = self.surfaces
+        eval_name = self.eval_name
+        num_eval_points = self.num_eval_points
 
         velocities_name = "{}_velocities".format(eval_name)
 
@@ -147,9 +166,9 @@ class EvalVelocities(om.ExplicitComponent):
             ind_1 += num
 
     def compute_partials(self, inputs, partials):
-        surfaces = self.options["surfaces"]
-        eval_name = self.options["eval_name"]
-        num_eval_points = self.options["num_eval_points"]
+        surfaces = self.surfaces
+        eval_name = self.eval_name
+        num_eval_points = self.num_eval_points
 
         system_size = self.system_size
 

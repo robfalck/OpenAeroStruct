@@ -2,8 +2,15 @@
 Class definition for the MeshPointForces component.
 """
 
+from typing import Any
+
 import numpy as np
-import openmdao.api as om
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class MeshPointForces(om.ExplicitComponent):
@@ -28,15 +35,22 @@ class MeshPointForces(om.ExplicitComponent):
         There is one of these per surface.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
-        self.options.declare("le_wt", default=0.75 * 0.5)
-        self.options.declare("te_wt", default=0.25 * 0.5)
+    surfaces: list[Surface]
+    le_wt: float = 0.75 * 0.5
+    te_wt: float = 0.25 * 0.5
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
-        le_wt = self.options["le_wt"]
-        te_wt = self.options["te_wt"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
+        surfaces = f["surfaces"]
+        le_wt = f["le_wt"]
+        te_wt = f["te_wt"]
 
         for surface in surfaces:
             mesh = surface["mesh"]
@@ -47,10 +61,10 @@ class MeshPointForces(om.ExplicitComponent):
             sec_forces_name = "{}_sec_forces".format(name)
             mesh_point_forces_name = "{}_mesh_point_forces".format(name)
 
-            self.add_input(sec_forces_name, shape=(nx - 1, ny - 1, 3), units="N", tags=["mphys_coupling"])
+            d.add_input(sec_forces_name, shape=(nx - 1, ny - 1, 3), units="N", tags=["mphys_coupling"])
 
             # TODO: what should res_ref be when it was np.sqrt(self.comm.size)
-            self.add_output(mesh_point_forces_name, val=np.zeros((nx, ny, 3)), units="N", tags=["mphys_coupling"])
+            d.add_output(mesh_point_forces_name, val=np.zeros((nx, ny, 3)), units="N", tags=["mphys_coupling"])
 
             # Sparse partials
             rowcol = np.arange(3 * (ny - 1))
@@ -74,16 +88,17 @@ class MeshPointForces(om.ExplicitComponent):
             vals[:nn2] = le_wt
             vals[nn2:] = te_wt
 
-            self.declare_partials(mesh_point_forces_name, sec_forces_name, rows=rows, cols=cols, val=vals)
+            d.declare_partials(mesh_point_forces_name, sec_forces_name, rows=rows, cols=cols, val=vals)
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         """
         Compute the forces on the nodmesh points from the panel section force.
         """
-        surfaces = self.options["surfaces"]
+        surfaces = self.surfaces
 
-        le_wt = self.options["le_wt"]
-        te_wt = self.options["te_wt"]
+        le_wt = self.le_wt
+        te_wt = self.te_wt
         for surface in surfaces:
             name = surface["name"]
             sec_forces_name = "{}_sec_forces".format(name)

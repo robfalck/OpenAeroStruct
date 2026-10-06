@@ -1,8 +1,14 @@
 """Group that manipulates geometry mesh based on high-level design parameters."""
 
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import Field, model_validator
+from pydantic_core import PydanticUndefined
+
+import om4.api as om
+from om4.core.system import System
+from om4.utils.polymorphic import Polymorphic
 
 from openaerostruct.geometry.geometry_mesh_transformations import (
     Taper,
@@ -15,18 +21,109 @@ from openaerostruct.geometry.geometry_mesh_transformations import (
     ShearZ,
     Rotate,
 )
+from openaerostruct.utils.om4_utils import field_values
+from openaerostruct.utils.surface import Surface
+
+
+_CHAIN = ["taper", "scale_x", "sweep", "shear_x", "stretch", "shear_y", "dihedral", "shear_z", "rotate"]
+
+
+def _geometry_mesh_kwargs(surface: Surface) -> dict:
+    """
+    Return the Group spec for GeometryMesh: the chain of mesh transformations for one surface.
+
+    A transformation's driving input is promoted only when the surface defines the matching
+    parameter, so that only active parameters appear on the parent.
+    """
+    ref_axis_pos = surface["ref_axis_pos"] if "ref_axis_pos" in surface else 0.25
+
+    mesh = np.asarray(surface["mesh"], dtype=float)
+    ny = mesh.shape[1]
+    mesh_shape = mesh.shape
+    symmetry = surface["symmetry"]
+
+    def prom(key, name):
+        return [name] if key in surface else []
+
+    subs = {}
+
+    # 1. Taper
+    subs["taper"] = om.Subsystem(
+        Taper(
+            val=surface["taper"] if "taper" in surface else 1.0,
+            mesh=mesh,
+            symmetry=symmetry,
+            ref_axis_pos=ref_axis_pos,
+        ),
+        promotes_inputs=prom("taper", "taper"),
+    )
+
+    # 2. Scale X
+    subs["scale_x"] = om.Subsystem(
+        ScaleX(val=np.ones(ny), mesh_shape=mesh_shape, ref_axis_pos=ref_axis_pos),
+        promotes_inputs=prom("chord_cp", "chord"),
+    )
+
+    # 3. Sweep
+    subs["sweep"] = om.Subsystem(
+        Sweep(val=surface["sweep"] if "sweep" in surface else 0.0, mesh_shape=mesh_shape, symmetry=symmetry),
+        promotes_inputs=prom("sweep", "sweep"),
+    )
+
+    # 4. Shear X
+    subs["shear_x"] = om.Subsystem(
+        ShearX(val=np.zeros(ny), mesh_shape=mesh_shape), promotes_inputs=prom("xshear_cp", "xshear")
+    )
+
+    # 5. Stretch
+    if "span" in surface:
+        span = surface["span"]
+    else:
+        # Compute span. We need .real to make span to avoid OpenMDAO warnings.
+        ref_axis = ref_axis_pos * mesh[-1, :, :] + (1 - ref_axis_pos) * mesh[0, :, :]
+        span = max(ref_axis[:, 1]).real - min(ref_axis[:, 1]).real
+        if symmetry:
+            span *= 2.0
+    subs["stretch"] = om.Subsystem(
+        Stretch(val=float(span), mesh_shape=mesh_shape, symmetry=symmetry, ref_axis_pos=ref_axis_pos),
+        promotes_inputs=prom("span", "span"),
+    )
+
+    # 6. Shear Y
+    subs["shear_y"] = om.Subsystem(
+        ShearY(val=np.zeros(ny), mesh_shape=mesh_shape), promotes_inputs=prom("yshear_cp", "yshear")
+    )
+
+    # 7. Dihedral
+    subs["dihedral"] = om.Subsystem(
+        Dihedral(val=surface["dihedral"] if "dihedral" in surface else 0.0, mesh_shape=mesh_shape, symmetry=symmetry),
+        promotes_inputs=prom("dihedral", "dihedral"),
+    )
+
+    # 8. Shear Z
+    subs["shear_z"] = om.Subsystem(
+        ShearZ(val=np.zeros(ny), mesh_shape=mesh_shape), promotes_inputs=prom("zshear_cp", "zshear")
+    )
+
+    # 9. Rotate
+    subs["rotate"] = om.Subsystem(
+        Rotate(val=np.zeros(ny), mesh_shape=mesh_shape, symmetry=symmetry, ref_axis_pos=ref_axis_pos),
+        promotes_inputs=prom("twist_cp", "twist"),
+        promotes_outputs=["mesh"],
+    )
+
+    connections = [om.Connection(src=f"{a}.mesh", tgt=f"{b}.in_mesh") for a, b in zip(_CHAIN[:-1], _CHAIN[1:])]
+
+    return {"subsystems": subs, "connections": connections}
 
 
 class GeometryMesh(om.Group):
     """
-    OpenMDAO group that performs mesh manipulation functions. It reads in
-    the initial mesh from the surface dictionary and outputs the altered
-    mesh based on the geometric design variables.
+    Group that performs mesh manipulation functions.
 
-    Depending on the design variables selected or the supplied geometry information,
-    only some of the follow parameters will actually be given to this component.
-    If parameters are not active (they do not deform the mesh), then
-    they will not be given to this component.
+    It reads the initial mesh from the surface and outputs the altered mesh based on the
+    geometric design variables.  Only parameters the surface defines are promoted (and so
+    can deform the mesh from above); the rest stay at their identity values.
 
     Parameters
     ----------
@@ -36,7 +133,7 @@ class GeometryMesh(om.Group):
         Dihedral angle in degrees.
     twist[ny] : numpy array
         1-D array of rotation angles for each wing slice in degrees.
-    chord_dist[ny] : numpy array
+    chord[ny] : numpy array
         Spanwise distribution of the chord scaler.
     taper : float
         Taper ratio for the wing; 1 is untapered, 0 goes to a point at the tip.
@@ -44,148 +141,20 @@ class GeometryMesh(om.Group):
     Returns
     -------
     mesh[nx, ny, 3] : numpy array
-        Modified mesh based on the initial mesh in the surface dictionary and
-        the geometric design variables.
+        Modified mesh based on the initial mesh in the surface and the geometric design variables.
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        surface = self.options["surface"]
+    # Derived from `surface`; not part of the constructor API.
+    subsystems: dict[str, om.Subsystem | Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
+    connections: list[om.Connection] = Field(default=PydanticUndefined, init=False)
 
-        if "ref_axis_pos" in surface:
-            ref_axis_pos = surface["ref_axis_pos"]
-        else:
-            ref_axis_pos = 0.25  # if no reference axis line is specified : it is the quarter-chord
-
-        mesh = surface["mesh"]
-        ny = mesh.shape[1]
-        mesh_shape = mesh.shape
-        symmetry = surface["symmetry"]
-
-        # This flag determines whether or not changes in z (dihedral) add an
-        # additional rotation matrix to modify the twist direction
-        self.rotate_x = True
-
-        # 1. Taper
-
-        if "taper" in surface:
-            val = surface["taper"]
-            promotes = ["taper"]
-        else:
-            val = 1.0
-            promotes = []
-
-        self.add_subsystem(
-            "taper", Taper(val=val, mesh=mesh, symmetry=symmetry, ref_axis_pos=ref_axis_pos), promotes_inputs=promotes
-        )
-
-        # 2. Scale X
-
-        val = np.ones(ny)
-        if "chord_cp" in surface:
-            promotes = ["chord"]
-        else:
-            promotes = []
-
-        self.add_subsystem(
-            "scale_x",
-            ScaleX(val=val, mesh_shape=mesh_shape, ref_axis_pos=ref_axis_pos),
-            promotes_inputs=promotes,
-        )
-
-        # 3. Sweep
-
-        if "sweep" in surface:
-            val = surface["sweep"]
-            promotes = ["sweep"]
-        else:
-            val = 0.0
-            promotes = []
-
-        self.add_subsystem("sweep", Sweep(val=val, mesh_shape=mesh_shape, symmetry=symmetry), promotes_inputs=promotes)
-
-        # 4. Shear X
-
-        val = np.zeros(ny)
-        if "xshear_cp" in surface:
-            promotes = ["xshear"]
-        else:
-            promotes = []
-
-        self.add_subsystem("shear_x", ShearX(val=val, mesh_shape=mesh_shape), promotes_inputs=promotes)
-
-        # 5. Stretch
-
-        if "span" in surface:
-            promotes = ["span"]
-            val = surface["span"]
-        else:
-            # Compute span. We need .real to make span to avoid OpenMDAO warnings.
-            ref_axis = ref_axis_pos * mesh[-1, :, :] + (1 - ref_axis_pos) * mesh[0, :, :]
-            span = max(ref_axis[:, 1]).real - min(ref_axis[:, 1]).real
-            if symmetry:
-                span *= 2.0
-            val = span
-            promotes = []
-
-        self.add_subsystem(
-            "stretch",
-            Stretch(val=val, mesh_shape=mesh_shape, symmetry=symmetry, ref_axis_pos=ref_axis_pos),
-            promotes_inputs=promotes,
-        )
-
-        # 6. Shear Y
-
-        val = np.zeros(ny)
-        if "yshear_cp" in surface:
-            promotes = ["yshear"]
-        else:
-            promotes = []
-
-        self.add_subsystem("shear_y", ShearY(val=val, mesh_shape=mesh_shape), promotes_inputs=promotes)
-
-        # 7. Dihedral
-
-        if "dihedral" in surface:
-            val = surface["dihedral"]
-            promotes = ["dihedral"]
-        else:
-            val = 0.0
-            promotes = []
-
-        self.add_subsystem(
-            "dihedral", Dihedral(val=val, mesh_shape=mesh_shape, symmetry=symmetry), promotes_inputs=promotes
-        )
-
-        # 8. Shear Z
-
-        val = np.zeros(ny)
-        if "zshear_cp" in surface:
-            promotes = ["zshear"]
-        else:
-            promotes = []
-
-        self.add_subsystem("shear_z", ShearZ(val=val, mesh_shape=mesh_shape), promotes_inputs=promotes)
-
-        # 9. Rotate
-
-        val = np.zeros(ny)
-        if "twist_cp" in surface:
-            promotes = ["twist"]
-        else:
-            val = np.zeros(ny)
-            promotes = []
-
-        self.add_subsystem(
-            "rotate",
-            Rotate(val=val, mesh_shape=mesh_shape, symmetry=symmetry, ref_axis_pos=ref_axis_pos),
-            promotes_inputs=promotes,
-            promotes_outputs=["mesh"],
-        )
-
-        names = ["taper", "scale_x", "sweep", "shear_x", "stretch", "shear_y", "dihedral", "shear_z", "rotate"]
-
-        for j in np.arange(len(names) - 1):
-            self.connect(names[j] + ".mesh", names[j + 1] + ".in_mesh")
+    @model_validator(mode="before")
+    @classmethod
+    def _build_from_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        data.update(_geometry_mesh_kwargs(f.surface))
+        return data
