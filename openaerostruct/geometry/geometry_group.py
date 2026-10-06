@@ -49,7 +49,7 @@ def _geometry_kwargs(surface: Surface) -> dict:
     the component default, as in OM3.
     """
     subs = {}
-    indep_defaults = {}
+    input_defaults = {}
     mesh_inputs = []
 
     for cp_key, name, units, mid_panel, x_cp_range in _SPLINES:
@@ -58,7 +58,7 @@ def _geometry_kwargs(surface: Surface) -> dict:
         n_cp = len(surface[cp_key])
         x_cp_start, x_cp_end = x_cp_range if x_cp_range else (None, None)
         is_dv = surface.get(f"{cp_key}_dv", True)
-        # om4 ignores IndepDefault.val (ai/OM4_NEEDS.md B-005), so the component default must
+        # om4 ignores InputDefault.val (ai/OM4_NEEDS.md B-005), so the component default must
         # carry the value too. Without the default, OM3 fell back to the spline's ones.
         cp_val = np.asarray(surface[cp_key], dtype=float) if is_dv else None
         subs[f"{name}_bsp"] = om.Subsystem(
@@ -79,20 +79,20 @@ def _geometry_kwargs(surface: Surface) -> dict:
         if name != "t_over_c":
             mesh_inputs.append(name)
         if is_dv:
-            indep_defaults[cp_key] = om.IndepDefault(val=cp_val, units=units)
+            input_defaults[cp_key] = om.InputDefault(val=cp_val, units=units)
 
     for key, units in _SCALARS:
         if key not in surface:
             continue
         mesh_inputs.append(key)
         if surface.get(f"{key}_dv", True):
-            indep_defaults[key] = om.IndepDefault(val=np.atleast_1d(float(surface[key])), units=units)
+            input_defaults[key] = om.InputDefault(val=np.atleast_1d(float(surface[key])), units=units)
 
     subs["mesh"] = om.Subsystem(
         GeometryMesh(surface=surface), promotes_inputs=mesh_inputs, promotes_outputs=["mesh"]
     )
 
-    return {"subsystems": subs, "indep_defaults": indep_defaults}
+    return {"subsystems": subs, "input_defaults": input_defaults}
 
 
 class Geometry(om.Group):
@@ -115,7 +115,7 @@ class Geometry(om.Group):
 
     # Derived from `surface`; not part of the constructor API.
     subsystems: dict[str, om.Subsystem | Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
-    indep_defaults: dict[str, om.IndepDefault] = Field(default=PydanticUndefined, init=False)
+    input_defaults: dict[str, om.InputDefault] = Field(default=PydanticUndefined, init=False)
 
     @model_validator(mode="before")
     @classmethod

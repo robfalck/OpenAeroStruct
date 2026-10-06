@@ -16,7 +16,7 @@ conventions in `dymos4.git/ai/ARCHITECTURE.md`. We reuse those conventions.
 | `compute(inputs, outputs)` | `compute_outputs(inputs, outputs)` |
 | `apply_nonlinear` / `linearize` (ImplicitComponent) | `compute_residuals` / `compute_partials` (`solve_nonlinear`, `solve_linear` keep their names) |
 | `Group.setup()` with `add_subsystem`/`connect`/`promotes` (270 / 387 / 375 sites) | Declarative `subsystems={name: Subsystem(...)}`, `connections=[Connection(...)]`. dymos4 pattern: a `_thing_kwargs(...)` builder plus a `Group` subclass whose before-validator calls it |
-| `set_input_defaults` | `indep_defaults={name: IndepDefault(...)}` |
+| `set_input_defaults` | `input_defaults={name: InputDefault(...)}` |
 | `om.IndepVarComp` (31 files) | Not needed: unconnected inputs are set with `Problem.set_val`, and `DesignVar` must sit on an unconnected input |
 | `add_design_var`/`add_constraint`/`add_objective` | `design_vars`/`constraints`/`objectives` fields on a `System`; `ref`/`scaler` become `AffineTransform.from_ref_ref0` / `from_scaler_adder` |
 | `ScipyOptimizeDriver` + `run_driver` (21 files) | `ScipyMinimizeOptimizer` on the root group's `optimizer` field + `Problem.run_optimizer()` → `OptimizerResult` |

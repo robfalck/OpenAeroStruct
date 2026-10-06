@@ -25,21 +25,21 @@ try:
     p = model()
     p.set_val("a", 5.0)
     p.run_model()
-    print("A) no IndepDefault, set_val('a', 5.0):  c_deg.y =", p.get_val("c_deg.y"), "deg;  c_rad.y =", p.get_val("c_rad.y"), "rad   (expected a setup error)")
+    print("A) no InputDefault, set_val('a', 5.0):  c_deg.y =", p.get_val("c_deg.y"), "deg;  c_rad.y =", p.get_val("c_rad.y"), "rad   (expected a setup error)")
 except RuntimeError as err:
-    print("A) no IndepDefault: setup error, as expected:", str(err).splitlines()[0])
+    print("A) no InputDefault: setup error, as expected:", str(err).splitlines()[0])
 
-p = model(indep_defaults={"a": om.IndepDefault(val=5.0, units="deg")})
+p = model(input_defaults={"a": om.InputDefault(val=5.0, units="deg")})
 p.run_model()
-print("B) IndepDefault(5 deg), no set_val:     c_deg.y =", p.get_val("c_deg.y"), "deg;  c_rad.y =", p.get_val("c_rad.y"), "rad;  get_val('a') =", p.get_val("a"), "  (expected 5 deg / 0.0873 rad)")
+print("B) InputDefault(5 deg), no set_val:     c_deg.y =", p.get_val("c_deg.y"), "deg;  c_rad.y =", p.get_val("c_rad.y"), "rad;  get_val('a') =", p.get_val("a"), "  (expected 5 deg / 0.0873 rad)")
 
-p = model(indep_defaults={"a": om.IndepDefault(val=5.0, units="deg")})
+p = model(input_defaults={"a": om.InputDefault(val=5.0, units="deg")})
 p.set_val("a", 7.0)
 p.run_model()
-print("C) IndepDefault(5 deg), set_val(a, 7):  c_deg.y =", p.get_val("c_deg.y"), "deg;  c_rad.y =", p.get_val("c_rad.y"), "rad   (expected 7 deg / 0.1222 rad)")
+print("C) InputDefault(5 deg), set_val(a, 7):  c_deg.y =", p.get_val("c_deg.y"), "deg;  c_rad.y =", p.get_val("c_rad.y"), "rad   (expected 7 deg / 0.1222 rad)")
 
 # D) Totals wrt a promoted input whose leaves have different units.
-p = model(indep_defaults={"a": om.IndepDefault(val=5.0, units="deg")})
+p = model(input_defaults={"a": om.InputDefault(val=5.0, units="deg")})
 p.set_val("a", 7.0)
 p.run_model()
 for mode in ("fwd", "rev"):
