@@ -121,3 +121,63 @@ class VarDecl:
 def vlm_system_size(surfaces) -> int:
     """Total number of VLM panels, sum of (nx - 1) * (ny - 1) over the surfaces."""
     return sum((s["mesh"].shape[0] - 1) * (s["mesh"].shape[1] - 1) for s in surfaces)
+
+
+class PartialsBuffer(dict):
+    """
+    Readable, sliceable local stand-in for om4's write-only subjacs (ai/OM4_NEEDS.md N-005).
+
+    OM3 code fills subjacs piecewise (``partials[k][:n] = a``, ``partials[k][0, 1:] += b``,
+    ``partials[k] *= 2``).  om4 subjacs only accept whole assignment, so ported
+    ``compute_partials`` methods write into this buffer exactly as the OM3 code wrote into
+    ``partials`` and then call :meth:`flush` once.
+
+    Each declared ``(of, wrt)`` starts as OM3's subjac did: its declared constant ``val``
+    (broadcast), else zeros, shaped ``(nnz,)`` for sparse declarations and
+    ``(of_size, wrt_size)`` for dense ones.  Only keys that were read or written are flushed,
+    so constant subjacs the code never touches stay constant.
+    """
+
+    def __init__(self, comp):
+        super().__init__()
+        self._dirty = set()
+        outs = {n: int(np.prod(v.shape)) for n, v in comp.outputs.items()}
+        ins = {n: int(np.prod(v.shape)) for n, v in comp.inputs.items()}
+        wrt_space = dict(ins)
+        if comp.is_implicit():
+            wrt_space.update(outs)
+        for spec in comp.partials:
+            for of in _match(spec.of, outs):
+                wrts = [spec.wrt] if isinstance(spec.wrt, str) else list(spec.wrt)
+                for wrt in (w for pat in wrts for w in _match(pat, wrt_space)):
+                    if spec.rows is not None:
+                        shape = (len(spec.rows),)
+                    elif spec.diagonal:
+                        shape = (outs[of],)
+                    else:
+                        shape = (outs[of], wrt_space[wrt])
+                    val = np.zeros(shape) if spec.val is None else np.broadcast_to(spec.val, shape).astype(float)
+                    super().__setitem__((of, wrt), np.array(val))
+
+    def __getitem__(self, key):
+        self._dirty.add(key)
+        return super().__getitem__(key)
+
+    def __setitem__(self, key, val):
+        if key not in self:
+            raise KeyError(f"Partial {key} was not declared.")
+        self._dirty.add(key)
+        buf = super().__getitem__(key)
+        buf[...] = np.asarray(val).reshape(buf.shape)
+
+    def flush(self, partials):
+        """Assign every touched subjac to the om4 ``partials`` once."""
+        for key in self._dirty:
+            partials[key] = super().__getitem__(key)
+
+
+def _match(pattern, names):
+    import fnmatch
+
+    pats = [pattern] if isinstance(pattern, str) else list(pattern)
+    return [n for n in names if any(fnmatch.fnmatchcase(n, p) for p in pats)]

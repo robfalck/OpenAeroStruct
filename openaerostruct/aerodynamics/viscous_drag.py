@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import PartialsBuffer, VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class ViscousDrag(om.ExplicitComponent):
@@ -36,36 +42,49 @@ class ViscousDrag(om.ExplicitComponent):
         shape.
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
-        self.options.declare("with_viscous", types=bool)
+    surface: Surface
+    with_viscous: bool | None = None  # unused; the surface's with_viscous decides
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
-        self.with_viscous = surface["with_viscous"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
+        surface = f["surface"]
+        # As in OM3, the surface decides; the with_viscous field is overwritten.
+        _spec["with_viscous"] = surface["with_viscous"]
 
         # Percentage of chord with laminar flow
-        self.k_lam = surface["k_lam"]
 
         # Thickness over chord for the airfoil
-        self.c_max_t = surface["c_max_t"]
 
         ny = surface["mesh"].shape[1]
 
-        self.add_input("re", val=5.0e6, units="1/m", tags=["mphys_input"])
-        self.add_input("Mach_number", val=1.6, tags=["mphys_input"])
-        self.add_input("S_ref", val=1.0, units="m**2", tags=["mphys_coupling"])
-        self.add_input("widths", val=np.ones((ny - 1)) * 0.2, units="m", tags=["mphys_coupling"])
-        self.add_input("lengths_spanwise", val=np.arange((ny - 1)) + 1.0, units="m", tags=["mphys_coupling"])
-        self.add_input("lengths", val=np.ones((ny)), units="m", tags=["mphys_coupling"])
-        self.add_input("t_over_c", val=np.arange((ny - 1)), tags=["mphys_input"])
-        self.add_output("CDv", val=0.0)
+        d.add_input("re", val=5.0e6, units="1/m", tags=["mphys_input"])
+        d.add_input("Mach_number", val=1.6, tags=["mphys_input"])
+        d.add_input("S_ref", val=1.0, units="m**2", tags=["mphys_coupling"])
+        d.add_input("widths", val=np.ones((ny - 1)) * 0.2, units="m", tags=["mphys_coupling"])
+        d.add_input("lengths_spanwise", val=np.arange((ny - 1)) + 1.0, units="m", tags=["mphys_coupling"])
+        d.add_input("lengths", val=np.ones((ny)), units="m", tags=["mphys_coupling"])
+        d.add_input("t_over_c", val=np.arange((ny - 1)), tags=["mphys_input"])
+        d.add_output("CDv", val=0.0)
 
-        self.declare_partials("CDv", "*")
+        d.declare_partials("CDv", "*")
+        return d.into(_spec)
 
-        self.set_check_partial_options(wrt="*", method="cs", step=1e-50)
+    @property
+    def k_lam(self):
+        return self.surface["k_lam"]
 
-    def compute(self, inputs, outputs):
+    @property
+    def c_max_t(self):
+        return self.surface["c_max_t"]
+
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         if self.with_viscous:
             re = inputs["re"]
             M = inputs["Mach_number"]
@@ -115,6 +134,8 @@ class ViscousDrag(om.ExplicitComponent):
 
     def compute_partials(self, inputs, partials):
         """Jacobian for viscous drag."""
+        # om4 subjacs are write-only (ai/OM4_NEEDS.md N-005); fill locally and flush once
+        partials_out, partials = partials, PartialsBuffer(self)
 
         partials["CDv", "lengths"] = np.zeros_like(partials["CDv", "lengths"])
         re = inputs["re"]
@@ -242,3 +263,5 @@ class ViscousDrag(om.ExplicitComponent):
                 partials["CDv", "Mach_number"][0, :] *= 2
                 partials["CDv", "re"][0, :] *= 2
                 partials["CDv", "t_over_c"][0, :] *= 2
+
+        partials.flush(partials_out)

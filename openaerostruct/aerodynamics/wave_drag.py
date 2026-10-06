@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any, ClassVar
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import PartialsBuffer, VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class WaveDrag(om.ExplicitComponent):
@@ -32,33 +38,42 @@ class WaveDrag(om.ExplicitComponent):
         Korn equation
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
-        self.options.declare("with_wave", types=bool)
+    surface: Surface
+    with_wave: bool | None = None  # unused; the surface's with_wave decides
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
-        self.with_wave = surface["with_wave"]
+    ka: ClassVar[float] = 0.95  # airfoil technology level (for NASA SC airfoil)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
+        surface = f["surface"]
+        # As in OM3, the surface decides; the with_wave field is overwritten.
+        _spec["with_wave"] = surface["with_wave"]
 
         # Thickness over chord for the airfoil
-        self.ka = 0.95  # airfoil technology level (for NASA SC airfoil)
 
         ny = surface["mesh"].shape[1]
 
-        self.add_input("Mach_number", val=1.6, tags=["mphys_input"])
-        self.add_input("widths", val=np.ones((ny - 1)) * 0.2, units="m", tags=["mphys_coupling"])
-        self.add_input(
+        d.add_input("Mach_number", val=1.6, tags=["mphys_input"])
+        d.add_input("widths", val=np.ones((ny - 1)) * 0.2, units="m", tags=["mphys_coupling"])
+        d.add_input(
             "lengths_spanwise", val=np.arange((ny - 1)) + 1.0, units="m", tags=["mphys_coupling"]
         )  # set to np.arange so that d_CDw_d_chords is nonzero
-        self.add_input("CL", val=0.33)
-        self.add_input("chords", val=np.ones((ny)), units="m", tags=["mphys_coupling"])
-        self.add_input("t_over_c", val=np.arange((ny - 1)), tags=["mphys_input"])
-        self.add_output("CDw", val=0.0)
+        d.add_input("CL", val=0.33)
+        d.add_input("chords", val=np.ones((ny)), units="m", tags=["mphys_coupling"])
+        d.add_input("t_over_c", val=np.arange((ny - 1)), tags=["mphys_input"])
+        d.add_output("CDw", val=0.0)
 
-        self.declare_partials("CDw", "*")
-        self.set_check_partial_options(wrt="*", method="cs", step=1e-50)
+        d.declare_partials("CDw", "*")
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         if self.with_wave:
             t_over_c = inputs["t_over_c"]
             widths = inputs["widths"]
@@ -88,6 +103,8 @@ class WaveDrag(om.ExplicitComponent):
     def compute_partials(self, inputs, partials):
         """Jacobian for wave drag."""
         # Explicitly zero out the partials to begin, we can't assume the input partials arrays contain zeros already
+        # om4 subjacs are write-only (ai/OM4_NEEDS.md N-005); fill locally and flush once
+        partials_out, partials = partials, PartialsBuffer(self)
         partials["CDw", "CL"][:] = 0.0
         partials["CDw", "lengths_spanwise"][:] = 0.0
         partials["CDw", "widths"][:] = 0.0
@@ -156,3 +173,5 @@ class WaveDrag(om.ExplicitComponent):
             partials["CDw", "Mach_number"][0, :] *= 2
             partials["CDw", "chords"][0, :] *= 2
             partials["CDw", "t_over_c"][0, :] *= 2
+
+        partials.flush(partials_out)

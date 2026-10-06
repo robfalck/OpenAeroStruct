@@ -100,7 +100,10 @@ class VortexMesh(om.ExplicitComponent):
                     # only need to add the extra inputs once
                     any_ground_effect = True
                     d.add_input("height_agl", val=8000.0, units="m")
-                    d.add_input("alpha", val=0.0 * np.pi / 180, units="rad", tags=["mphys_inputs"])
+                    # OM3 declared alpha in rad here and deg everywhere else. om4 totals skip the unit
+                    # conversion across a mixed-unit promoted input (ai/OM4_NEEDS.md B-008), so this
+                    # component takes deg like the rest and converts internally.
+                    d.add_input("alpha", val=0.0, units="deg", tags=["mphys_inputs"])
 
             if surface["symmetry"]:
                 left_wing = abs(surface["mesh"][0, 0, 1]) > abs(surface["mesh"][0, -1, 1])
@@ -298,7 +301,7 @@ class VortexMesh(om.ExplicitComponent):
                     mesh[:nx, : ny - 1, :] = inputs[mesh_name][:, 1:, :][:, ::-1, :]
                     mesh[:nx, : ny - 1, 1] *= -1.0
 
-                alpha = inputs["alpha"][0]
+                alpha = inputs["alpha"][0] * np.pi / 180.0
                 plane_normal = np.array([np.sin(alpha), 0.0, -np.cos(alpha)]).reshape((1, 1, 3))
                 plane_point = np.zeros((1, 1, 3)) + plane_normal * inputs["height_agl"]
 
@@ -353,7 +356,7 @@ class VortexMesh(om.ExplicitComponent):
 
                 # first comes quadrant 3
                 # x on x, y on y, z on z, x on z, z on x is the order
-                alpha = inputs["alpha"]
+                alpha = inputs["alpha"] * np.pi / 180.0
                 x_on_x_const = 1 - 2 * np.sin(alpha) ** 2
                 z_on_z_const = 1 - 2 * np.cos(alpha) ** 2
                 x_on_z_const = 2 * np.sin(alpha) * np.cos(alpha)
@@ -419,14 +422,14 @@ class VortexMesh(om.ExplicitComponent):
                 # m' = m - 2 (m.n - h) n, with n = (sin a, 0, -cos a) and h = height_agl, so
                 # dm'/dh = 2 n and dm'/da = -2 ((m.dn) n + (m.n - h) dn), dn = (cos a, 0, sin a).
                 # Only the reflected half (rows nx:) depends on them.
-                a = inputs["alpha"][0]
+                a = inputs["alpha"][0] * np.pi / 180.0
                 h = inputs["height_agl"][0]
                 n = np.array([np.sin(a), 0.0, -np.cos(a)])
                 dn = np.array([np.cos(a), 0.0, np.sin(a)])
                 m = self._y_mirrored_mesh(surface, inputs[mesh_name])
                 m_dot_n = np.einsum("ijk,k->ij", m, n)[:, :, np.newaxis]
                 m_dot_dn = np.einsum("ijk,k->ij", m, dn)[:, :, np.newaxis]
-                dref_da = -2.0 * (m_dot_dn * n + (m_dot_n - h) * dn)
+                dref_da = -2.0 * (m_dot_dn * n + (m_dot_n - h) * dn) * np.pi / 180.0  # per degree
                 dref_dh = np.broadcast_to(2.0 * n, m.shape)
                 for wrt, dref in (("alpha", dref_da), ("height_agl", dref_dh)):
                     dvort = np.zeros((2 * nx, 2 * ny - 1, 3))

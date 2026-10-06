@@ -34,3 +34,11 @@ p = model(input_defaults={"a": om.InputDefault(val=5.0, units="deg")})
 p.set_val("a", 7.0)
 p.run_model()
 print("C) InputDefault(5 deg), set_val(a, 7):  c_deg.y =", p.get_val("c_deg.y"), "deg;  c_rad.y =", p.get_val("c_rad.y"), "rad   (expected 7 deg / 0.1222 rad)")
+
+# D) Totals wrt a promoted input whose leaves have different units.
+p = model(input_defaults={"a": om.InputDefault(val=5.0, units="deg")})
+p.set_val("a", 7.0)
+p.run_model()
+for mode in ("fwd", "rev"):
+    J = p.compute_totals(of=["c_deg.y", "c_rad.y"], wrt=["a"], mode=mode).todense().ravel()
+    print(f"D) d[c_deg.y, c_rad.y]/da ({mode}) =", J, "  (expected [1, 0.01745329] in deg-based 'a')")

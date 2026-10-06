@@ -1,8 +1,39 @@
-import openmdao.api as om
+from typing import Any
+
+from pydantic import Field, model_validator
+from pydantic_core import PydanticUndefined
+
+import om4.api as om
+from om4.core.system import System
+from om4.utils.polymorphic import Polymorphic
 
 from openaerostruct.functionals.moment_coefficient import MomentCoefficient
 from openaerostruct.functionals.total_lift_drag import TotalLiftDrag
 from openaerostruct.functionals.sum_areas import SumAreas
+from openaerostruct.utils.om4_utils import field_values
+from openaerostruct.utils.surface import Surface
+
+
+def _total_aero_performance_kwargs(surfaces: list[Surface], user_specified_Sref: bool) -> dict:
+    """Return the Group spec for TotalAeroPerformance."""
+    subs = {}
+    if not user_specified_Sref:
+        subs["sum_areas"] = om.Subsystem(
+            SumAreas(surfaces=surfaces), promotes_inputs=["*S_ref"], promotes_outputs=["S_ref_total"]
+        )
+
+    subs["CL_CD"] = om.Subsystem(
+        TotalLiftDrag(surfaces=surfaces),
+        promotes_inputs=["*CL", "*CD", "*S_ref", "S_ref_total", "rho", "v"],
+        promotes_outputs=["CL", "CD", "L", "D"],
+    )
+
+    subs["moment"] = om.Subsystem(
+        MomentCoefficient(surfaces=surfaces),
+        promotes_inputs=["v", "cg", "rho", "*S_ref", "*b_pts", "*widths", "*chords", "*sec_forces", "S_ref_total"],
+        promotes_outputs=["CM"],
+    )
+    return {"subsystems": subs}
 
 
 class TotalAeroPerformance(om.Group):
@@ -10,28 +41,17 @@ class TotalAeroPerformance(om.Group):
     Group to contain the total aerodynamic performance components.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
-        self.options.declare("user_specified_Sref", types=bool)
+    surfaces: list[Surface]
+    user_specified_Sref: bool
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
+    # Derived from the fields above; not part of the constructor API.
+    subsystems: dict[str, om.Subsystem | Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
 
-        if not self.options["user_specified_Sref"]:
-            self.add_subsystem(
-                "sum_areas", SumAreas(surfaces=surfaces), promotes_inputs=["*S_ref"], promotes_outputs=["S_ref_total"]
-            )
-
-        self.add_subsystem(
-            "CL_CD",
-            TotalLiftDrag(surfaces=surfaces),
-            promotes_inputs=["*CL", "*CD", "*S_ref", "S_ref_total", "rho", "v"],
-            promotes_outputs=["CL", "CD", "L", "D"],
-        )
-
-        self.add_subsystem(
-            "moment",
-            MomentCoefficient(surfaces=surfaces),
-            promotes_inputs=["v", "cg", "rho", "*S_ref", "*b_pts", "*widths", "*chords", "*sec_forces", "S_ref_total"],
-            promotes_outputs=["CM"],
-        )
+    @model_validator(mode="before")
+    @classmethod
+    def _build_from_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        data.update(_total_aero_performance_kwargs(f.surfaces, f.user_specified_Sref))
+        return data

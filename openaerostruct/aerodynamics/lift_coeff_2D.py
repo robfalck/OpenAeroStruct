@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class LiftCoeff2D(om.ExplicitComponent):
@@ -32,43 +38,61 @@ class LiftCoeff2D(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
 
-        self.nx = surface["mesh"].shape[0]
-        self.ny = surface["mesh"].shape[1]
-        self.num_panels = (self.nx - 1) * (self.ny - 1)
+        surface = f["surface"]
+
+        nx, ny = surface["mesh"].shape[:2]
 
         # Inputs
-        self.add_input("alpha", val=3.0, units="deg", tags=["mphys_input"])
-        self.add_input("sec_forces", val=np.ones((self.nx - 1, self.ny - 1, 3)), units="N", tags=["mphys_coupling"])
-        self.add_input("widths", val=np.ones((self.ny - 1)) * 0.2, units="m", tags=["mphys_coupling"])
-        self.add_input("chords", val=np.ones((self.ny)), units="m", tags=["mphys_coupling"])
-        self.add_input("v", val=1.0, units="m/s", tags=["mphys_input"])
-        self.add_input("rho", val=1.0, units="kg/m**3", tags=["mphys_input"])
+        d.add_input("alpha", val=3.0, units="deg", tags=["mphys_input"])
+        d.add_input("sec_forces", val=np.ones((nx - 1, ny - 1, 3)), units="N", tags=["mphys_coupling"])
+        d.add_input("widths", val=np.ones((ny - 1)) * 0.2, units="m", tags=["mphys_coupling"])
+        d.add_input("chords", val=np.ones((ny)), units="m", tags=["mphys_coupling"])
+        d.add_input("v", val=1.0, units="m/s", tags=["mphys_input"])
+        d.add_input("rho", val=1.0, units="kg/m**3", tags=["mphys_input"])
 
         # Outputs
-        self.add_output("Cl", val=np.zeros((self.ny - 1)))
+        d.add_output("Cl", val=np.zeros((ny - 1)))
 
-        self.declare_partials("Cl", "widths")
-        self.declare_partials("Cl", "v")
-        self.declare_partials("Cl", "rho")
-        self.declare_partials("Cl", "alpha")
+        d.declare_partials("Cl", "widths")
+        d.declare_partials("Cl", "v")
+        d.declare_partials("Cl", "rho")
+        d.declare_partials("Cl", "alpha")
 
         # Added to declare Jacobian sparse
-        arange = np.arange(self.ny - 1)
+        arange = np.arange(ny - 1)
         rows = np.tile(arange, 2)
         cols = np.hstack((arange, arange + 1))
-        self.declare_partials("Cl", "chords", rows=rows, cols=cols)
+        d.declare_partials("Cl", "chords", rows=rows, cols=cols)
 
-        rows = np.tile(np.repeat(arange, 3), self.nx - 1)
-        cols = np.arange((self.ny - 1) * (self.nx - 1) * 3)
-        self.declare_partials("Cl", "sec_forces", rows=rows, cols=cols)
+        rows = np.tile(np.repeat(arange, 3), nx - 1)
+        cols = np.arange((ny - 1) * (nx - 1) * 3)
+        d.declare_partials("Cl", "sec_forces", rows=rows, cols=cols)
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
+    @property
+    def nx(self) -> int:
+        return self.surface["mesh"].shape[0]
+
+    @property
+    def ny(self) -> int:
+        return self.surface["mesh"].shape[1]
+
+    @property
+    def num_panels(self) -> int:
+        return (self.nx - 1) * (self.ny - 1)
+
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         # Input parameters
         alpha = inputs["alpha"] * np.pi / 180.0
         cosa = np.cos(alpha)

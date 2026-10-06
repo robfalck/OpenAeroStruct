@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import PartialsBuffer, VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class MomentCoefficient(om.ExplicitComponent):
@@ -40,39 +46,53 @@ class MomentCoefficient(om.ExplicitComponent):
         The coefficient of moment around the x-, y-, and z-axes at the cg point.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
+    surfaces: list[Surface]
 
-    def setup(self):
-        for surface in self.options["surfaces"]:
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
+        for surface in f["surfaces"]:
             name = surface["name"]
             nx = surface["mesh"].shape[0]
             ny = surface["mesh"].shape[1]
 
-            self.add_input(name + "_b_pts", val=np.ones((nx - 1, ny, 3)), units="m", tags=["mphys_coupling"])
-            self.add_input(name + "_widths", val=np.ones((ny - 1)), units="m", tags=["mphys_coupling"])
-            self.add_input(name + "_chords", val=np.ones((ny)), units="m", tags=["mphys_coupling"])
-            self.add_input(name + "_S_ref", val=1.0, units="m**2", tags=["mphys_coupling"])
-            self.add_input(name + "_sec_forces", val=np.ones((nx - 1, ny - 1, 3)), units="N", tags=["mphys_coupling"])
+            d.add_input(name + "_b_pts", val=np.ones((nx - 1, ny, 3)), units="m", tags=["mphys_coupling"])
+            d.add_input(name + "_widths", val=np.ones((ny - 1)), units="m", tags=["mphys_coupling"])
+            d.add_input(name + "_chords", val=np.ones((ny)), units="m", tags=["mphys_coupling"])
+            d.add_input(name + "_S_ref", val=1.0, units="m**2", tags=["mphys_coupling"])
+            d.add_input(name + "_sec_forces", val=np.ones((nx - 1, ny - 1, 3)), units="N", tags=["mphys_coupling"])
 
-        self.add_input("cg", val=np.ones((3)), units="m", tags=["mphys_input"])
-        self.add_input("v", val=10.0, units="m/s", tags=["mphys_input"])
-        self.add_input("rho", val=3.0, units="kg/m**3", tags=["mphys_input"])
-        self.add_input("S_ref_total", val=1.0, units="m**2", tags=["mphys_input"])
+        d.add_input("cg", val=np.ones((3)), units="m", tags=["mphys_input"])
+        d.add_input("v", val=10.0, units="m/s", tags=["mphys_input"])
+        d.add_input("rho", val=3.0, units="kg/m**3", tags=["mphys_input"])
+        d.add_input("S_ref_total", val=1.0, units="m**2", tags=["mphys_input"])
 
-        self.add_output("CM", val=np.ones((3)), tags=["mphys_result"])
-        self.add_output("M", val=np.ones((3)), units="N*m", tags=["mphys_result"])
+        d.add_output("CM", val=np.ones((3)), tags=["mphys_result"])
+        d.add_output("M", val=np.ones((3)), units="N*m", tags=["mphys_result"])
 
-        self.declare_partials(of="*", wrt="*")
+        d.declare_partials(of="*", wrt="*")
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
+    def _moment(self, inputs):
+        """
+        Return the total moment and the first (main) surface's MAC and S_ref.
+
+        OM3 cached these on the instance in compute for compute_partials to read back;
+        recomputing them removes that dependence on call order.
+        """
         cg = inputs["cg"]
 
         M = np.zeros((3))
 
         # Loop through each surface and find its contributions to the moment
         # of the aircraft based on the section forces and their location
-        for j, surface in enumerate(self.options["surfaces"]):
+        for j, surface in enumerate(self.surfaces):
             name = surface["name"]
 
             b_pts = inputs[name + "_b_pts"]
@@ -114,27 +134,29 @@ class MomentCoefficient(om.ExplicitComponent):
             # For the first (main) lifting surface, we save the MAC to correctly
             # normalize CM
             if j == 0:
-                self.MAC_wing = MAC
-                self.S_ref_wing = S_ref
+                MAC_wing = MAC
+                S_ref_wing = S_ref
 
-        self.M = M
+        return M, MAC_wing, S_ref_wing
+
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        M, MAC_wing, _ = self._moment(inputs)
 
         # Output the moment vector
         outputs["M"] = M
 
         # Compute the normalized CM
-        outputs["CM"] = M / (0.5 * inputs["rho"] * inputs["v"] ** 2 * inputs["S_ref_total"] * self.MAC_wing)
+        outputs["CM"] = M / (0.5 * inputs["rho"] * inputs["v"] ** 2 * inputs["S_ref_total"] * MAC_wing)
 
     def compute_partials(self, inputs, partials):
+        # om4 subjacs are write-only (ai/OM4_NEEDS.md N-005); fill locally and flush once
+        partials_out, partials = partials, PartialsBuffer(self)
         cg = inputs["cg"]
         rho = inputs["rho"]
         S_ref_total = inputs["S_ref_total"]
         v = inputs["v"]
 
-        # Cached values
-        M = self.M
-        MAC_wing = self.MAC_wing
-        S_ref_wing = self.S_ref_wing
+        M, MAC_wing, S_ref_wing = self._moment(inputs)
 
         # Scaling factor of one over the dynamic pressure times sum of reference areas times the wing MAC
         fact = 1.0 / (0.5 * rho * v**2 * S_ref_total * MAC_wing)
@@ -146,7 +168,7 @@ class MomentCoefficient(om.ExplicitComponent):
         partials["CM", "cg"][:] = 0.0
 
         # Loop through each surface.
-        for j, surface in enumerate(self.options["surfaces"]):
+        for j, surface in enumerate(self.surfaces):
             name = surface["name"]
             nx = surface["mesh"].shape[0]
             ny = surface["mesh"].shape[1]
@@ -322,3 +344,5 @@ class MomentCoefficient(om.ExplicitComponent):
                 partials["CM", base_name + "_widths"] -= np.outer(M_j * term, base_dMAC_dw)
                 # partials["CM", base_name + "_S_ref"] -= np.outer(M_j, base_dMAC_dS * term)
                 partials["CM", base_name + "_S_ref"] += np.outer(M_j * fact, (1 / S_ref_wing))
+
+        partials.flush(partials_out)

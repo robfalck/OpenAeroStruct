@@ -38,8 +38,11 @@ SYSTEM_SIZE = '''
 
 def port_class(cls_src, fields, implicit=False):
     """Rewrite one class body (text from ``class X`` to the next top-level statement)."""
-    head, rest = cls_src.split("    def initialize(self):", 1)
-    _, rest = rest.split("    def setup(self):", 1)
+    if "    def initialize(self):" in cls_src:
+        head, rest = cls_src.split("    def initialize(self):", 1)
+        _, rest = rest.split("    def setup(self):", 1)
+    else:
+        head, rest = cls_src.split("    def setup(self):", 1)
     compute_sig = "    def apply_nonlinear(self, inputs, outputs, residuals):" if implicit else None
     if implicit:
         setup_body, rest = rest.split(compute_sig, 1)

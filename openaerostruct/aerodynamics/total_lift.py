@@ -1,4 +1,11 @@
-import openmdao.api as om
+from typing import Any
+
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl
+from openaerostruct.utils.surface import Surface
 
 
 class TotalLift(om.ExplicitComponent):
@@ -17,19 +24,22 @@ class TotalLift(om.ExplicitComponent):
         Total coefficient of lift (CL) for the lifting surface.
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
 
-        self.add_input("CL1", val=1.0)
+        d.add_input("CL1", val=1.0)
 
-        self.add_output("CL", val=1.0, tags=["mphys_result"])
+        d.add_output("CL", val=1.0, tags=["mphys_result"])
 
-        self.CL0 = surface["CL0"]
+        d.declare_partials("CL", "CL1", val=1.0)
+        return d.into(_spec)
 
-        self.declare_partials("CL", "CL1", val=1.0)
-
-    def compute(self, inputs, outputs):
-        outputs["CL"] = inputs["CL1"] + self.CL0
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        outputs["CL"] = inputs["CL1"] + self.surface["CL0"]

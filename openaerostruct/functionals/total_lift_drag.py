@@ -1,4 +1,11 @@
-import openmdao.api as om
+from typing import Any
+
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class TotalLiftDrag(om.ExplicitComponent):
@@ -32,37 +39,45 @@ class TotalLiftDrag(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
+    surfaces: list[Surface]
 
-    def setup(self):
-        for surface in self.options["surfaces"]:
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
+        for surface in f["surfaces"]:
             name = surface["name"]
-            self.add_input(name + "_CL", val=1.0, tags=["mphys_result"])
-            self.add_input(name + "_CD", val=1.0, tags=["mphys_result"])
-            self.add_input(name + "_S_ref", val=1.0, units="m**2", tags=["mphys_coupling"])
-            self.declare_partials(["CL", "L"], name + "_CL")
-            self.declare_partials(["CD", "D"], name + "_CD")
-            self.declare_partials(["CL", "L"], name + "_S_ref")
-            self.declare_partials(["CD", "D"], name + "_S_ref")
+            d.add_input(name + "_CL", val=1.0, tags=["mphys_result"])
+            d.add_input(name + "_CD", val=1.0, tags=["mphys_result"])
+            d.add_input(name + "_S_ref", val=1.0, units="m**2", tags=["mphys_coupling"])
+            d.declare_partials(["CL", "L"], name + "_CL")
+            d.declare_partials(["CD", "D"], name + "_CD")
+            d.declare_partials(["CL", "L"], name + "_S_ref")
+            d.declare_partials(["CD", "D"], name + "_S_ref")
 
-        self.add_input("S_ref_total", val=1.0, units="m**2", tags=["mphys_input"])
-        self.add_input("rho", val=1.0, units="kg/m**3", tags=["mphys_input"])
-        self.add_input("v", val=1.0, units="m/s", tags=["mphys_input"])
-        self.add_output("CL", val=1.0, tags=["mphys_result"])
-        self.add_output("CD", val=1.0, tags=["mphys_result"])
-        self.add_output("L", val=1.0, units="N", tags=["mphys_result"])
-        self.add_output("D", val=1.0, units="N", tags=["mphys_result"])
-        self.declare_partials("CL", "S_ref_total")
-        self.declare_partials("CD", "S_ref_total")
-        self.declare_partials(["L", "D"], ["rho", "v"])
+        d.add_input("S_ref_total", val=1.0, units="m**2", tags=["mphys_input"])
+        d.add_input("rho", val=1.0, units="kg/m**3", tags=["mphys_input"])
+        d.add_input("v", val=1.0, units="m/s", tags=["mphys_input"])
+        d.add_output("CL", val=1.0, tags=["mphys_result"])
+        d.add_output("CD", val=1.0, tags=["mphys_result"])
+        d.add_output("L", val=1.0, units="N", tags=["mphys_result"])
+        d.add_output("D", val=1.0, units="N", tags=["mphys_result"])
+        d.declare_partials("CL", "S_ref_total")
+        d.declare_partials("CD", "S_ref_total")
+        d.declare_partials(["L", "D"], ["rho", "v"])
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         # Compute the weighted CL and CD contributions from each surface,
         # weighted by the individual surface areas
         CL = 0.0
         CD = 0.0
-        for surface in self.options["surfaces"]:
+        for surface in self.surfaces:
             name = surface["name"]
             S_ref = inputs[name + "_S_ref"]
             CL += inputs[name + "_CL"] * S_ref
@@ -81,7 +96,7 @@ class TotalLiftDrag(om.ExplicitComponent):
         # weighted by the individual surface areas
         CL = 0.0
         CD = 0.0
-        for surface in self.options["surfaces"]:
+        for surface in self.surfaces:
             name = surface["name"]
             S_ref = inputs[name + "_S_ref"]
             CL += inputs[name + "_CL"] * S_ref
@@ -98,7 +113,7 @@ class TotalLiftDrag(om.ExplicitComponent):
         partials["CL", "S_ref_total"] = -CL / S_ref_total**2
         partials["CD", "S_ref_total"] = -CD / S_ref_total**2
 
-        for surface in self.options["surfaces"]:
+        for surface in self.surfaces:
             name = surface["name"]
             S_ref = inputs[name + "_S_ref"]
             partials["CL", name + "_CL"] = S_ref / S_ref_total

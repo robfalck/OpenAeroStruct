@@ -1,4 +1,10 @@
-import openmdao.api as om
+from typing import Any
+
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl
 
 
 class Coeffs(om.ExplicitComponent):
@@ -25,26 +31,34 @@ class Coeffs(om.ExplicitComponent):
         Induced coefficient of drag (CD) for the lifting surface.
     """
 
-    def setup(self):
-        self.add_input("S_ref", val=1.0, units="m**2", tags=["mphys_coupling"])
-        self.add_input("L", val=1.0, units="N")
-        self.add_input("D", val=1.0, units="N")
-        self.add_input("v", val=1.0, units="m/s", tags=["mphys_input"])
-        self.add_input("rho", val=1.0, units="kg/m**3", tags=["mphys_input"])
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
 
-        self.add_output("CL1", val=0.0)
-        self.add_output("CDi", val=0.0)
+        d.add_input("S_ref", val=1.0, units="m**2", tags=["mphys_coupling"])
+        d.add_input("L", val=1.0, units="N")
+        d.add_input("D", val=1.0, units="N")
+        d.add_input("v", val=1.0, units="m/s", tags=["mphys_input"])
+        d.add_input("rho", val=1.0, units="kg/m**3", tags=["mphys_input"])
 
-        self.declare_partials("CL1", "L")
-        self.declare_partials("CDi", "D")
-        self.declare_partials("CL1", "v")
-        self.declare_partials("CDi", "v")
-        self.declare_partials("CL1", "rho")
-        self.declare_partials("CDi", "rho")
-        self.declare_partials("CL1", "S_ref")
-        self.declare_partials("CDi", "S_ref")
+        d.add_output("CL1", val=0.0)
+        d.add_output("CDi", val=0.0)
 
-    def compute(self, inputs, outputs):
+        d.declare_partials("CL1", "L")
+        d.declare_partials("CDi", "D")
+        d.declare_partials("CL1", "v")
+        d.declare_partials("CDi", "v")
+        d.declare_partials("CL1", "rho")
+        d.declare_partials("CDi", "rho")
+        d.declare_partials("CL1", "S_ref")
+        d.declare_partials("CDi", "S_ref")
+        return d.into(_spec)
+
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         S_ref = inputs["S_ref"]
         rho = inputs["rho"]
         v = inputs["v"]

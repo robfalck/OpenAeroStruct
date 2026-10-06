@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class LiftDrag(om.ExplicitComponent):
@@ -26,26 +32,45 @@ class LiftDrag(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
 
-        self.nx = nx = surface["mesh"].shape[0]
-        self.ny = ny = surface["mesh"].shape[1]
-        self.num_panels = (nx - 1) * (ny - 1)
+        surface = f["surface"]
 
-        self.add_input("sec_forces", val=np.ones((nx - 1, ny - 1, 3)), units="N", tags=["mphys_coupling"])
-        self.add_input("alpha", val=3.0, units="deg", tags=["mphys_input"])
-        self.add_input("beta", val=0.0, units="deg", tags=["mphys_input"])
-        self.add_output("L", val=0.0, units="N")
-        self.add_output("D", val=0.0, units="N")
+        nx = surface["mesh"].shape[0]
+        ny = surface["mesh"].shape[1]
 
-        self.declare_partials(["L", "D"], ["sec_forces", "alpha"])
-        self.declare_partials("D", "beta")
+        d.add_input("sec_forces", val=np.ones((nx - 1, ny - 1, 3)), units="N", tags=["mphys_coupling"])
+        d.add_input("alpha", val=3.0, units="deg", tags=["mphys_input"])
+        d.add_input("beta", val=0.0, units="deg", tags=["mphys_input"])
+        d.add_output("L", val=0.0, units="N")
+        d.add_output("D", val=0.0, units="N")
 
-    def compute(self, inputs, outputs):
+        d.declare_partials(["L", "D"], ["sec_forces", "alpha"])
+        d.declare_partials("D", "beta")
+        return d.into(_spec)
+
+    @property
+    def nx(self) -> int:
+        return self.surface["mesh"].shape[0]
+
+    @property
+    def ny(self) -> int:
+        return self.surface["mesh"].shape[1]
+
+    @property
+    def num_panels(self) -> int:
+        return (self.nx - 1) * (self.ny - 1)
+
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         alpha = inputs["alpha"] * np.pi / 180.0
         beta = inputs["beta"] * np.pi / 180.0
         forces = inputs["sec_forces"].reshape(-1, 3)

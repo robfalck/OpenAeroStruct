@@ -1,9 +1,97 @@
-import openmdao.api as om
-from openaerostruct.aerodynamics.compressible_states import CompressibleVLMStates
+from typing import Any
+
+import numpy as np
+from pydantic import Field, model_validator
+from pydantic_core import PydanticUndefined
+
+import om4.api as om
+from om4.core.system import System
+from om4.utils.polymorphic import Polymorphic
+
 from openaerostruct.aerodynamics.geometry import VLMGeometry
 from openaerostruct.aerodynamics.states import VLMStates
 from openaerostruct.aerodynamics.functionals import VLMFunctionals
 from openaerostruct.functionals.total_aero_performance import TotalAeroPerformance
+from openaerostruct.utils.om4_utils import field_values
+from openaerostruct.utils.surface import Surface
+
+
+def _aero_point_kwargs(surfaces: list[Surface], user_specified_Sref: bool, rotational: bool, compressible: bool) -> dict:
+    """Return the Group spec for AeroPoint: per-surface geometry, the VLM states, and performance."""
+    if compressible:
+        raise NotImplementedError("Compressible VLM states are not yet ported to om4; see ai/TECH_DEBT.md.")
+
+    subs = {}
+    connections = []
+
+    def conn(src, tgt):
+        connections.append(om.Connection(src=src, tgt=tgt))
+
+    # Loop through each surface and connect relevant parameters
+    for surface in surfaces:
+        name = surface["name"]
+
+        conn(name + ".normals", "aero_states." + name + "_normals")
+
+        # Connect the results from 'aero_states' to the performance groups
+        conn("aero_states." + name + "_sec_forces", name + "_perf" + ".sec_forces")
+
+        # Connect S_ref for performance calcs
+        conn(name + ".S_ref", name + "_perf.S_ref")
+        conn(name + ".widths", name + "_perf.widths")
+        conn(name + ".chords", name + "_perf.chords")
+        conn(name + ".lengths", name + "_perf.lengths")
+        conn(name + ".lengths_spanwise", name + "_perf.lengths_spanwise")
+
+        # Connect S_ref for performance calcs
+        conn(name + ".S_ref", "total_perf." + name + "_S_ref")
+        conn(name + ".widths", "total_perf." + name + "_widths")
+        conn(name + ".chords", "total_perf." + name + "_chords")
+        conn(name + ".b_pts", "total_perf." + name + "_b_pts")
+        conn(name + "_perf" + ".CL", "total_perf." + name + "_CL")
+        conn(name + "_perf" + ".CD", "total_perf." + name + "_CD")
+        conn("aero_states." + name + "_sec_forces", "total_perf." + name + "_sec_forces")
+
+        subs[name] = VLMGeometry(surface=surface)
+
+    # Add a single 'aero_states' group that solves for the circulations and forces
+    # from all the surfaces, since each surface interacts with the others.
+    ground_effect = any(surface.get("groundplane", False) for surface in surfaces)
+
+    prom_in = ["v", "alpha", "beta", "rho"]
+    if ground_effect:
+        prom_in.append("height_agl")
+    if rotational:
+        prom_in.extend(["omega", "cg"])
+
+    subs["aero_states"] = om.Subsystem(
+        VLMStates(surfaces=surfaces, rotational=rotational, linear_solver=om.LinearRunOnce()),
+        promotes_inputs=prom_in,
+        promotes_outputs=["circulations"],
+    )
+
+    for surface in surfaces:
+        subs[surface["name"] + "_perf"] = om.Subsystem(
+            VLMFunctionals(surface=surface),
+            promotes_inputs=["v", "alpha", "beta", "Mach_number", "re", "rho"],
+        )
+
+    # Total aero performance (CL, CD, CM) of the aircraft, accounting for all lifting surfaces.
+    subs["total_perf"] = om.Subsystem(
+        TotalAeroPerformance(surfaces=surfaces, user_specified_Sref=user_specified_Sref),
+        promotes_inputs=["v", "rho", "cg", "S_ref_total"],
+        promotes_outputs=["CM", "CL", "CD"],
+    )
+
+    input_defaults = {
+        # beta is often unused (unconnected), so give it a default value and units
+        "beta": om.InputDefault(val=np.zeros(1), units="deg"),
+        # alpha is rad in VortexMesh (ground effect) and deg elsewhere; om4 needs the
+        # promoted units stated or set_val skips the conversion (ai/OM4_NEEDS.md B-004)
+        "alpha": om.InputDefault(units="deg"),
+    }
+
+    return {"subsystems": subs, "connections": connections, "input_defaults": input_defaults}
 
 
 class AeroPoint(om.Group):
@@ -13,129 +101,23 @@ class AeroPoint(om.Group):
     condition you want to study.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
-        self.options.declare("user_specified_Sref", types=bool, default=False)
-        self.options.declare(
-            "rotational", False, types=bool, desc="Set to True to turn on support for computing angular velocities"
-        )
-        self.options.declare(
-            "compressible",
-            types=bool,
-            default=False,
-            desc="Turns on compressibility correction for moderate Mach number flows. Defaults to False.",
-        )
+    surfaces: list[Surface]
+    user_specified_Sref: bool = False
+    rotational: bool = Field(default=False, description="Turn on support for computing angular velocities.")
+    compressible: bool = Field(
+        default=False, description="Compressibility correction for moderate Mach number flows (not yet ported)."
+    )
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
-        rotational = self.options["rotational"]
+    # Derived from the fields above; not part of the constructor API.
+    subsystems: dict[str, om.Subsystem | Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
+    connections: list[om.Connection] = Field(default=PydanticUndefined, init=False)
+    input_defaults: dict[str, om.InputDefault] = Field(default=PydanticUndefined, init=False)
 
-        # Check for multi-section surfaces and create suitable surface dictionaries for them
-        for i, surface in enumerate(surfaces):
-            # If multisection mesh then build a single surface with the unified mesh data
-            if "is_multi_section" in surface.keys():
-                import copy
-
-                target_keys = [
-                    # Essential Info
-                    "name",
-                    "symmetry",
-                    "S_ref_type",
-                    "ref_axis_pos",
-                    "mesh",
-                    # aerodynamics
-                    "CL0",
-                    "CD0",
-                    "with_viscous",
-                    "with_wave",
-                    "groundplane",
-                    "k_lam",
-                    "t_over_c_cp",
-                    "c_max_t",
-                ]
-
-                # Constructs a surface dictionary and adds the specified supported keys and values from the mult-section surface dictionary.
-                aeroSurface = {}
-                for k in set(surface).intersection(target_keys):
-                    aeroSurface[k] = surface[k]
-                # print(aeroSurface["name"])
-                surfaces[i] = copy.deepcopy(aeroSurface)
-
-        # Loop through each surface and connect relevant parameters
-        for surface in surfaces:
-            name = surface["name"]
-
-            self.connect(name + ".normals", "aero_states." + name + "_normals")
-
-            # Connect the results from 'aero_states' to the performance groups
-            self.connect("aero_states." + name + "_sec_forces", name + "_perf" + ".sec_forces")
-
-            # Connect S_ref for performance calcs
-            self.connect(name + ".S_ref", name + "_perf.S_ref")
-            self.connect(name + ".widths", name + "_perf.widths")
-            self.connect(name + ".chords", name + "_perf.chords")
-            self.connect(name + ".lengths", name + "_perf.lengths")
-            self.connect(name + ".lengths_spanwise", name + "_perf.lengths_spanwise")
-
-            # Connect S_ref for performance calcs
-            self.connect(name + ".S_ref", "total_perf." + name + "_S_ref")
-            self.connect(name + ".widths", "total_perf." + name + "_widths")
-            self.connect(name + ".chords", "total_perf." + name + "_chords")
-            self.connect(name + ".b_pts", "total_perf." + name + "_b_pts")
-            self.connect(name + "_perf" + ".CL", "total_perf." + name + "_CL")
-            self.connect(name + "_perf" + ".CD", "total_perf." + name + "_CD")
-            self.connect("aero_states." + name + "_sec_forces", "total_perf." + name + "_sec_forces")
-
-            self.add_subsystem(name, VLMGeometry(surface=surface))
-
-        # Add a single 'aero_states' component that solves for the circulations
-        # and forces from all the surfaces.
-        # While other components only depends on a single surface,
-        # this component requires information from all surfaces because
-        # each surface interacts with the others.
-
-        # check for ground effect and if so, promote
-        ground_effect = False
-        for surface in surfaces:
-            if surface.get("groundplane", False):
-                ground_effect = True
-
-        if self.options["compressible"] is True:
-            aero_states = CompressibleVLMStates(surfaces=surfaces, rotational=rotational)
-            prom_in = ["v", "alpha", "beta", "rho", "Mach_number"]
-        else:
-            aero_states = VLMStates(surfaces=surfaces, rotational=rotational)
-            prom_in = ["v", "alpha", "beta", "rho"]
-        if ground_effect:
-            prom_in.append("height_agl")
-
-        aero_states.linear_solver = om.LinearRunOnce()
-
-        if rotational:
-            prom_in.extend(["omega", "cg"])
-
-        self.add_subsystem("aero_states", aero_states, promotes_inputs=prom_in, promotes_outputs=["circulations"])
-
-        # Explicitly connect parameters from each surface's group and the common
-        # 'aero_states' group.
-        # This is necessary because the VLMStates component requires information
-        # from each surface, but this information is stored within each
-        # surface's group.
-        for surface in surfaces:
-            self.add_subsystem(
-                surface["name"] + "_perf",
-                VLMFunctionals(surface=surface),
-                promotes_inputs=["v", "alpha", "beta", "Mach_number", "re", "rho"],
-            )
-
-        # Add the total aero performance group to compute the CL, CD, and CM
-        # of the total aircraft. This accounts for all lifting surfaces.
-        self.add_subsystem(
-            "total_perf",
-            TotalAeroPerformance(surfaces=surfaces, user_specified_Sref=self.options["user_specified_Sref"]),
-            promotes_inputs=["v", "rho", "cg", "S_ref_total"],
-            promotes_outputs=["CM", "CL", "CD"],
-        )
-
-        # Need to set the default value/unit for beta since it is often unused (unconnected)
-        self.set_input_defaults("beta", val=0.0, units="deg")
+    @model_validator(mode="before")
+    @classmethod
+    def _build_from_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        data.update(_aero_point_kwargs(f.surfaces, f.user_specified_Sref, f.rotational, f.compressible))
+        return data
