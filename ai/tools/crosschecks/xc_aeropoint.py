@@ -68,8 +68,3 @@ for sym, ground, tail in ((True, False, False), (True, False, True), (False, Fal
         out.append(f"{mode} {np.max(abs(J3 - J4)) / np.max(abs(J3)):.1e}")
     print(f"sym={sym!s:5} ground={ground!s:5} tail={tail!s:5} CL={p4.get_val('aero_point_0.CL')[0]:.6f}  values diff {vd:.1e}  totals rel diff: {', '.join(out)}")
 
-# per-column diagnosis for the last (ground effect) case
-for w3, w4 in zip(wrt3, wrt4):
-    a = p3.compute_totals(of=of, wrt=[w3], return_format="array")
-    b = p4.compute_totals(of=of, wrt=[w4], mode="fwd").todense()
-    print(f"  d/d{w4:18} max rel diff {np.max(abs(a - b)) / max(np.max(abs(a)), 1e-30):.2e}   ratio sample {np.ravel(b)[0] / np.ravel(a)[0] if np.ravel(a)[0] else float('nan'):.6f}")

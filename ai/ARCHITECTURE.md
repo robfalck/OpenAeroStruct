@@ -16,7 +16,7 @@ porting conventions follow dymos4 (`../dymos4.git/ai/ARCHITECTURE.md`). Plan:
    Avoid `model_post_init`. Values derived from fields that `compute_*` needs are
    `functools.cached_property`s, or are recomputed.
 4. **Groups** follow the dymos4 pattern: a `_<thing>_kwargs(...)` builder returns
-   `subsystems`/`connections`/`input_defaults`/solvers, and the `Group` subclass's
+   `subsystems`/`connections`/`indep_defaults`/solvers, and the `Group` subclass's
    before-validator calls it.
 5. **Shapes match OM3.** OM3 scalars are shape `(1,)`, so ported variables declare `(1,)`
    explicitly. Units are always given explicitly, `None` for dimensionless, because an

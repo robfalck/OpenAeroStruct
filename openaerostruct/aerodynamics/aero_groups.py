@@ -83,15 +83,18 @@ def _aero_point_kwargs(surfaces: list[Surface], user_specified_Sref: bool, rotat
         promotes_outputs=["CM", "CL", "CD"],
     )
 
-    input_defaults = {
+    indep_defaults = {
         # beta is often unused (unconnected), so give it a default value and units
-        "beta": om.InputDefault(val=np.zeros(1), units="deg"),
-        # alpha is rad in VortexMesh (ground effect) and deg elsewhere; om4 needs the
-        # promoted units stated or set_val skips the conversion (ai/OM4_NEEDS.md B-004)
-        "alpha": om.InputDefault(units="deg"),
+        "beta": om.IndepDefault(val=np.zeros(1), units="deg"),
+        # alpha's leaves disagree on their default value (0 vs 1 deg), which om4 rejects
+        # at setup unless the promoted input gets an IndepDefault
+        "alpha": om.IndepDefault(val=np.zeros(1), units="deg"),
+        # MomentCoefficient's defaults (10 m/s, 3 kg/m**3) differ from every other leaf's 1.0
+        "v": om.IndepDefault(val=np.ones(1), units="m/s"),
+        "rho": om.IndepDefault(val=np.ones(1), units="kg/m**3"),
     }
 
-    return {"subsystems": subs, "connections": connections, "input_defaults": input_defaults}
+    return {"subsystems": subs, "connections": connections, "indep_defaults": indep_defaults}
 
 
 class AeroPoint(om.Group):
@@ -111,7 +114,7 @@ class AeroPoint(om.Group):
     # Derived from the fields above; not part of the constructor API.
     subsystems: dict[str, om.Subsystem | Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
     connections: list[om.Connection] = Field(default=PydanticUndefined, init=False)
-    input_defaults: dict[str, om.InputDefault] = Field(default=PydanticUndefined, init=False)
+    indep_defaults: dict[str, om.IndepDefault] = Field(default=PydanticUndefined, init=False)
 
     @model_validator(mode="before")
     @classmethod
