@@ -20,32 +20,29 @@ from openaerostruct.utils.surface import Surface
 
 def _vlm_functionals_kwargs(surface: Surface) -> dict:
     """Return the Group spec for VLMFunctionals."""
-    sub = om.Subsystem
     return {
         "subsystems": {
-            "liftcoeff": sub(
-                LiftCoeff2D(surface=surface),
+            "liftcoeff": LiftCoeff2D(
+                surface=surface,
                 promotes_inputs=["v", "alpha", "rho", "widths", "chords", "sec_forces"],
                 promotes_outputs=["Cl"],
             ),
-            "liftdrag": sub(
-                LiftDrag(surface=surface),
-                promotes_inputs=["alpha", "beta", "sec_forces"],
-                promotes_outputs=["L", "D"],
+            "liftdrag": LiftDrag(
+                surface=surface, promotes_inputs=["alpha", "beta", "sec_forces"], promotes_outputs=["L", "D"]
             ),
-            "coeffs": sub(Coeffs(), promotes_inputs=["v", "rho", "S_ref", "L", "D"], promotes_outputs=["CL1", "CDi"]),
-            "CL": sub(TotalLift(surface=surface), promotes_inputs=["CL1"], promotes_outputs=["CL"]),
-            "viscousdrag": sub(
-                ViscousDrag(surface=surface),
+            "coeffs": Coeffs(promotes_inputs=["v", "rho", "S_ref", "L", "D"], promotes_outputs=["CL1", "CDi"]),
+            "CL": TotalLift(surface=surface, promotes_inputs=["CL1"], promotes_outputs=["CL"]),
+            "viscousdrag": ViscousDrag(
+                surface=surface,
                 promotes_inputs=["Mach_number", "re", "widths", "lengths_spanwise", "lengths", "S_ref", "t_over_c"],
                 promotes_outputs=["CDv"],
             ),
-            "wavedrag": sub(
-                WaveDrag(surface=surface),
+            "wavedrag": WaveDrag(
+                surface=surface,
                 promotes_inputs=["Mach_number", "lengths_spanwise", "widths", "CL", "chords", "t_over_c"],
                 promotes_outputs=["CDw"],
             ),
-            "CD": sub(TotalDrag(surface=surface), promotes_inputs=["CDv", "CDi", "CDw"], promotes_outputs=["CD"]),
+            "CD": TotalDrag(surface=surface, promotes_inputs=["CDv", "CDi", "CDw"], promotes_outputs=["CD"]),
         }
     }
 
@@ -61,7 +58,7 @@ class VLMFunctionals(om.Group):
     surface: Surface
 
     # Derived from `surface`; not part of the constructor API.
-    subsystems: dict[str, om.Subsystem | Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
+    subsystems: dict[str, Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
 
     @model_validator(mode="before")
     @classmethod

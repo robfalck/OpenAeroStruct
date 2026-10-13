@@ -61,18 +61,16 @@ def _geometry_kwargs(surface: Surface) -> dict:
         # om4 ignores InputDefault.val (ai/OM4_NEEDS.md B-005), so the component default must
         # carry the value too. Without the default, OM3 fell back to the spline's ones.
         cp_val = np.asarray(surface[cp_key], dtype=float) if is_dv else None
-        subs[f"{name}_bsp"] = om.Subsystem(
-            BsplineComp(
-                num_cp=n_cp,
-                x_interp=get_normalized_span_coords(surface, mid_panel=mid_panel),
-                order=min(n_cp, 4),
-                x_cp_start=x_cp_start,
-                x_cp_end=x_cp_end,
-                cp_name=cp_key,
-                interp_name=name,
-                units=units,
-                cp_val=cp_val,
-            ),
+        subs[f"{name}_bsp"] = BsplineComp(
+            num_cp=n_cp,
+            x_interp=get_normalized_span_coords(surface, mid_panel=mid_panel),
+            order=min(n_cp, 4),
+            x_cp_start=x_cp_start,
+            x_cp_end=x_cp_end,
+            cp_name=cp_key,
+            interp_name=name,
+            units=units,
+            cp_val=cp_val,
             promotes_inputs=[cp_key],
             promotes_outputs=[name],
         )
@@ -88,9 +86,7 @@ def _geometry_kwargs(surface: Surface) -> dict:
         if surface.get(f"{key}_dv", True):
             input_defaults[key] = om.InputDefault(val=np.atleast_1d(float(surface[key])), units=units)
 
-    subs["mesh"] = om.Subsystem(
-        GeometryMesh(surface=surface), promotes_inputs=mesh_inputs, promotes_outputs=["mesh"]
-    )
+    subs["mesh"] = GeometryMesh(surface=surface, promotes_inputs=mesh_inputs, promotes_outputs=["mesh"])
 
     return {"subsystems": subs, "input_defaults": input_defaults}
 
@@ -109,12 +105,10 @@ class Geometry(om.Group):
     """
 
     surface: Surface
-    connect_geom_DVs: bool = Field(
-        default=True, description="No longer necessary; kept for backward compatibility."
-    )
+    connect_geom_DVs: bool = Field(default=True, description="No longer necessary; kept for backward compatibility.")
 
     # Derived from `surface`; not part of the constructor API.
-    subsystems: dict[str, om.Subsystem | Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
+    subsystems: dict[str, Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
     input_defaults: dict[str, om.InputDefault] = Field(default=PydanticUndefined, init=False)
 
     @model_validator(mode="before")

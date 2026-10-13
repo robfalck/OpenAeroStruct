@@ -18,8 +18,8 @@ class Echo(om.ExplicitComponent):
 
 def model(**kw):
     return om.Problem(model=om.Group(subsystems={
-        "c_deg": om.Subsystem(Echo(unit="deg", val=0.0), promotes_inputs=["a"]),
-        "c_rad": om.Subsystem(Echo(unit="rad", val=1.0), promotes_inputs=["a"])}, **kw))
+        "c_deg": Echo(unit="deg", val=0.0, promotes_inputs=["a"]),
+        "c_rad": Echo(unit="rad", val=1.0, promotes_inputs=["a"])}, **kw))
 
 try:
     p = model()

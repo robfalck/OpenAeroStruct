@@ -48,32 +48,29 @@ def _geometry_mesh_kwargs(surface: Surface) -> dict:
     subs = {}
 
     # 1. Taper
-    subs["taper"] = om.Subsystem(
-        Taper(
-            val=surface["taper"] if "taper" in surface else 1.0,
-            mesh=mesh,
-            symmetry=symmetry,
-            ref_axis_pos=ref_axis_pos,
-        ),
+    subs["taper"] = Taper(
+        val=surface["taper"] if "taper" in surface else 1.0,
+        mesh=mesh,
+        symmetry=symmetry,
+        ref_axis_pos=ref_axis_pos,
         promotes_inputs=prom("taper", "taper"),
     )
 
     # 2. Scale X
-    subs["scale_x"] = om.Subsystem(
-        ScaleX(val=np.ones(ny), mesh_shape=mesh_shape, ref_axis_pos=ref_axis_pos),
-        promotes_inputs=prom("chord_cp", "chord"),
+    subs["scale_x"] = ScaleX(
+        val=np.ones(ny), mesh_shape=mesh_shape, ref_axis_pos=ref_axis_pos, promotes_inputs=prom("chord_cp", "chord")
     )
 
     # 3. Sweep
-    subs["sweep"] = om.Subsystem(
-        Sweep(val=surface["sweep"] if "sweep" in surface else 0.0, mesh_shape=mesh_shape, symmetry=symmetry),
+    subs["sweep"] = Sweep(
+        val=surface["sweep"] if "sweep" in surface else 0.0,
+        mesh_shape=mesh_shape,
+        symmetry=symmetry,
         promotes_inputs=prom("sweep", "sweep"),
     )
 
     # 4. Shear X
-    subs["shear_x"] = om.Subsystem(
-        ShearX(val=np.zeros(ny), mesh_shape=mesh_shape), promotes_inputs=prom("xshear_cp", "xshear")
-    )
+    subs["shear_x"] = ShearX(val=np.zeros(ny), mesh_shape=mesh_shape, promotes_inputs=prom("xshear_cp", "xshear"))
 
     # 5. Stretch
     if "span" in surface:
@@ -84,30 +81,34 @@ def _geometry_mesh_kwargs(surface: Surface) -> dict:
         span = max(ref_axis[:, 1]).real - min(ref_axis[:, 1]).real
         if symmetry:
             span *= 2.0
-    subs["stretch"] = om.Subsystem(
-        Stretch(val=float(span), mesh_shape=mesh_shape, symmetry=symmetry, ref_axis_pos=ref_axis_pos),
+    subs["stretch"] = Stretch(
+        val=float(span),
+        mesh_shape=mesh_shape,
+        symmetry=symmetry,
+        ref_axis_pos=ref_axis_pos,
         promotes_inputs=prom("span", "span"),
     )
 
     # 6. Shear Y
-    subs["shear_y"] = om.Subsystem(
-        ShearY(val=np.zeros(ny), mesh_shape=mesh_shape), promotes_inputs=prom("yshear_cp", "yshear")
-    )
+    subs["shear_y"] = ShearY(val=np.zeros(ny), mesh_shape=mesh_shape, promotes_inputs=prom("yshear_cp", "yshear"))
 
     # 7. Dihedral
-    subs["dihedral"] = om.Subsystem(
-        Dihedral(val=surface["dihedral"] if "dihedral" in surface else 0.0, mesh_shape=mesh_shape, symmetry=symmetry),
+    subs["dihedral"] = Dihedral(
+        val=surface["dihedral"] if "dihedral" in surface else 0.0,
+        mesh_shape=mesh_shape,
+        symmetry=symmetry,
         promotes_inputs=prom("dihedral", "dihedral"),
     )
 
     # 8. Shear Z
-    subs["shear_z"] = om.Subsystem(
-        ShearZ(val=np.zeros(ny), mesh_shape=mesh_shape), promotes_inputs=prom("zshear_cp", "zshear")
-    )
+    subs["shear_z"] = ShearZ(val=np.zeros(ny), mesh_shape=mesh_shape, promotes_inputs=prom("zshear_cp", "zshear"))
 
     # 9. Rotate
-    subs["rotate"] = om.Subsystem(
-        Rotate(val=np.zeros(ny), mesh_shape=mesh_shape, symmetry=symmetry, ref_axis_pos=ref_axis_pos),
+    subs["rotate"] = Rotate(
+        val=np.zeros(ny),
+        mesh_shape=mesh_shape,
+        symmetry=symmetry,
+        ref_axis_pos=ref_axis_pos,
         promotes_inputs=prom("twist_cp", "twist"),
         promotes_outputs=["mesh"],
     )
@@ -147,7 +148,7 @@ class GeometryMesh(om.Group):
     surface: Surface
 
     # Derived from `surface`; not part of the constructor API.
-    subsystems: dict[str, om.Subsystem | Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
+    subsystems: dict[str, Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
     connections: list[om.Connection] = Field(default=PydanticUndefined, init=False)
 
     @model_validator(mode="before")

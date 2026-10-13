@@ -52,7 +52,7 @@ for sym, ground, tail in ((True, False, False), (True, False, True), (False, Fal
     cl = []
     conns(S, lambda a, b: cl.append(om.Connection(src=a, tgt=b)))
     subs = {s["name"]: G4(surface=dict(s)) for s in S}
-    subs["aero_point_0"] = om.Subsystem(A4(surfaces=[dict(s) for s in S]), promotes_inputs=list(flow))
+    subs["aero_point_0"] = A4(surfaces=[dict(s) for s in S], promotes_inputs=list(flow))
     p4 = om.Problem(model=om.Group(subsystems=subs, connections=cl))
     for k, (v, u) in flow.items():
         p4.set_val(k, v, units=u)

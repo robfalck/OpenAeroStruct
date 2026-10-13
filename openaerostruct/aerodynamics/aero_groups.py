@@ -16,7 +16,9 @@ from openaerostruct.utils.om4_utils import field_values
 from openaerostruct.utils.surface import Surface
 
 
-def _aero_point_kwargs(surfaces: list[Surface], user_specified_Sref: bool, rotational: bool, compressible: bool) -> dict:
+def _aero_point_kwargs(
+    surfaces: list[Surface], user_specified_Sref: bool, rotational: bool, compressible: bool
+) -> dict:
     """Return the Group spec for AeroPoint: per-surface geometry, the VLM states, and performance."""
     if compressible:
         raise NotImplementedError("Compressible VLM states are not yet ported to om4; see ai/TECH_DEBT.md.")
@@ -64,21 +66,23 @@ def _aero_point_kwargs(surfaces: list[Surface], user_specified_Sref: bool, rotat
     if rotational:
         prom_in.extend(["omega", "cg"])
 
-    subs["aero_states"] = om.Subsystem(
-        VLMStates(surfaces=surfaces, rotational=rotational, linear_solver=om.LinearRunOnce()),
+    subs["aero_states"] = VLMStates(
+        surfaces=surfaces,
+        rotational=rotational,
+        linear_solver=om.LinearRunOnce(),
         promotes_inputs=prom_in,
         promotes_outputs=["circulations"],
     )
 
     for surface in surfaces:
-        subs[surface["name"] + "_perf"] = om.Subsystem(
-            VLMFunctionals(surface=surface),
-            promotes_inputs=["v", "alpha", "beta", "Mach_number", "re", "rho"],
+        subs[surface["name"] + "_perf"] = VLMFunctionals(
+            surface=surface, promotes_inputs=["v", "alpha", "beta", "Mach_number", "re", "rho"]
         )
 
     # Total aero performance (CL, CD, CM) of the aircraft, accounting for all lifting surfaces.
-    subs["total_perf"] = om.Subsystem(
-        TotalAeroPerformance(surfaces=surfaces, user_specified_Sref=user_specified_Sref),
+    subs["total_perf"] = TotalAeroPerformance(
+        surfaces=surfaces,
+        user_specified_Sref=user_specified_Sref,
         promotes_inputs=["v", "rho", "cg", "S_ref_total"],
         promotes_outputs=["CM", "CL", "CD"],
     )
@@ -112,7 +116,7 @@ class AeroPoint(om.Group):
     )
 
     # Derived from the fields above; not part of the constructor API.
-    subsystems: dict[str, om.Subsystem | Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
+    subsystems: dict[str, Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
     connections: list[om.Connection] = Field(default=PydanticUndefined, init=False)
     input_defaults: dict[str, om.InputDefault] = Field(default=PydanticUndefined, init=False)
 

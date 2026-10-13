@@ -63,7 +63,7 @@ class Test(unittest.TestCase):
 
             # The flow conditions are promoted to the model, where they are set below.
             # (OM3 used an IndepVarComp; om4 sets unconnected inputs directly.)
-            subsystems[point_name] = om.Subsystem(AeroPoint(surfaces=surfaces), promotes_inputs=FLOW_VARS)
+            subsystems[point_name] = AeroPoint(surfaces=surfaces, promotes_inputs=FLOW_VARS)
 
             # Connect the parameters within the model for each aero point
             for surface in surfaces:

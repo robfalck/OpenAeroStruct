@@ -18,18 +18,16 @@ def _total_aero_performance_kwargs(surfaces: list[Surface], user_specified_Sref:
     """Return the Group spec for TotalAeroPerformance."""
     subs = {}
     if not user_specified_Sref:
-        subs["sum_areas"] = om.Subsystem(
-            SumAreas(surfaces=surfaces), promotes_inputs=["*S_ref"], promotes_outputs=["S_ref_total"]
-        )
+        subs["sum_areas"] = SumAreas(surfaces=surfaces, promotes_inputs=["*S_ref"], promotes_outputs=["S_ref_total"])
 
-    subs["CL_CD"] = om.Subsystem(
-        TotalLiftDrag(surfaces=surfaces),
+    subs["CL_CD"] = TotalLiftDrag(
+        surfaces=surfaces,
         promotes_inputs=["*CL", "*CD", "*S_ref", "S_ref_total", "rho", "v"],
         promotes_outputs=["CL", "CD", "L", "D"],
     )
 
-    subs["moment"] = om.Subsystem(
-        MomentCoefficient(surfaces=surfaces),
+    subs["moment"] = MomentCoefficient(
+        surfaces=surfaces,
         promotes_inputs=["v", "cg", "rho", "*S_ref", "*b_pts", "*widths", "*chords", "*sec_forces", "S_ref_total"],
         promotes_outputs=["CM"],
     )
@@ -45,7 +43,7 @@ class TotalAeroPerformance(om.Group):
     user_specified_Sref: bool
 
     # Derived from the fields above; not part of the constructor API.
-    subsystems: dict[str, om.Subsystem | Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
+    subsystems: dict[str, Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
 
     @model_validator(mode="before")
     @classmethod

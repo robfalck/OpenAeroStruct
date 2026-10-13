@@ -20,7 +20,7 @@ for sym in (True, False):
     vals = {"twist": np.linspace(-3, 2, ny), "chord": np.linspace(1.2, 0.8, ny), "sweep": 10.0, "span": 45.0,
             "dihedral": 4.0, "taper": 0.5, "xshear": np.linspace(0, 1, ny), "zshear": np.linspace(0, 0.3, ny)}
     p3 = om3.Problem(reports=False); p3.model.add_subsystem("g", old.GeometryMesh(surface=surf), promotes_inputs=["*"]); p3.setup()
-    p4 = om.Problem(model=om.Group(subsystems={"g": om.Subsystem(GeometryMesh(surface=surf), promotes_inputs=["*"])}))
+    p4 = om.Problem(model=om.Group(subsystems={"g": GeometryMesh(surface=surf, promotes_inputs=["*"])}))
     for k, v in vals.items():
         p3.set_val(k, v); p4.set_val(k, v)
     p3.run_model(); p4.run_model()

@@ -11,7 +11,7 @@ for sym in (True, False):
     m2 = generate_mesh({"num_y": 5, "num_x": 2, "wing_type": "rect", "symmetry": sym}) + np.array([30.0, 0, 2.0])
     S = [{"name": "wing", "mesh": m1, "symmetry": sym}, {"name": "tail", "mesh": m2, "symmetry": sym}]
     p3 = om3.Problem(reports=False); p3.model.add_subsystem("s", O(surfaces=S), promotes=["*"]); p3.model.set_input_defaults("alpha", 5.0, units="deg"); p3.setup()
-    p4 = om.Problem(model=om.Group(subsystems={"s": om.Subsystem(N(surfaces=S), promotes_inputs=["*"], promotes_outputs=["*"])}))
+    p4 = om.Problem(model=om.Group(subsystems={"s": N(surfaces=S, promotes_inputs=["*"], promotes_outputs=["*"])}))
     vals = {"v": 248.0, "alpha": 5.0, "beta": 1.0, "rho": 0.38, "wing_normals": None}
     for s in S:
         nx, ny = s["mesh"].shape[:2]
