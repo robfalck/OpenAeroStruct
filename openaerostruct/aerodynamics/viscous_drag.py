@@ -43,6 +43,7 @@ class ViscousDrag(om.ExplicitComponent):
     """
 
     surface: Surface
+    check_partials_options: om.CheckPartialsOptions | None = om.CheckPartialsOptions(differentiator="cs")
     with_viscous: bool | None = None  # unused; the surface's with_viscous decides
 
     @model_validator(mode="before")

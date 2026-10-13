@@ -39,6 +39,7 @@ class WaveDrag(om.ExplicitComponent):
     """
 
     surface: Surface
+    check_partials_options: om.CheckPartialsOptions | None = om.CheckPartialsOptions(differentiator="cs")
     with_wave: bool | None = None  # unused; the surface's with_wave decides
 
     ka: ClassVar[float] = 0.95  # airfoil technology level (for NASA SC airfoil)

@@ -11,7 +11,8 @@ Rewrites, per class:
 
 It does NOT handle subjac slice writes (ai/OM4_NEEDS.md N-005), ``method="cs"`` partials
 (N-002), or other instance state; the caller fixes those by hand and must cross-check the
-result against OM3 (ai/tools/om3_crosscheck.py).
+result against OM3 (ai/tools/om3_crosscheck.py). ``set_check_partial_options`` is dropped; the
+caller adds a ``check_partials_options`` field by hand (N-004).
 """
 
 import re

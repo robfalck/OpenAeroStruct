@@ -43,6 +43,9 @@ class VLMMtxRHSComp(om.ExplicitComponent):
     """
 
     surfaces: list[Surface]
+    check_partials_options: om.CheckPartialsOptions | None = om.CheckPartialsOptions(
+        differentiator=om.FiniteDifference.forward(step=1e-5)
+    )
 
     @model_validator(mode="before")
     @classmethod

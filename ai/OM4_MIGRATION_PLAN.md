@@ -24,10 +24,10 @@ conventions in `dymos4.git/ai/ARCHITECTURE.md`. We reuse those conventions.
 | `NonlinearBlockGS(use_aitken=True)` | `NonlinearBlockGS(relaxation=AitkenRelaxation())` |
 | `DirectSolver(assemble_jac=True)` + `assembled_jac_type="csc"` | `DirectSolver(assembled_format="sparse")` |
 | `LinearBlockGS`, `LinearRunOnce`, `NewtonSolver`, `ExecComp`, `BalanceComp` | Present in OM4 with renamed/typed fields |
-| `declare_partials(..., method="cs"/"fd")` (~16 components) | No per-subjac approximation in `PartialsSpec`. Only component-level `differentiator="cs"/"fd"` is available. See §4 D3 |
+| `declare_partials(..., method="cs"/"fd")` (~16 components) | No per-subjac approximation in `PartialsSpec`, and none will be requested (N-002 closed). Each component gets one differentiator: analytic or component-level `"cs"/"fd"`. See §4 D3 |
 | `om.SplineComp(method="bsplines")` (geometry group) | **Missing in OM4.** See §4 D4 |
 | `prob.setup(force_alloc_complex=True)` | Removed. CS stores are local to the CS node (ADL-019) |
-| `check_partials(method=..., compact_print=...)`, `set_check_partial_options`, `assert_check_partials` | `check_partials` exists with a different signature/result. No `assert_check_partials`, no per-component check options. A local helper is needed |
+| `check_partials(method=..., compact_print=...)`, `set_check_partial_options`, `assert_check_partials` | `check_partials` exists with a different signature/result. Per-component check settings exist as `check_partials_options` (per component, not per `wrt`; N-004). No `assert_check_partials`. A local helper is needed |
 | `SqliteRecorder` / `CaseReader` on the driver | Solver and Problem scopes only; no optimizer recording |
 | Instance state such as `self.lu`, `self.system_size` set in `setup` | Declared fields, or `PrivateAttr` for runtime caches |
 
@@ -67,7 +67,7 @@ classes, 24 group classes, 138 test files, and 206 tests.
   user scripts keep working.
 - **B-spline component**, an OAS-local `BsplineComp` (§4 D4) with tests.
 - **Test helpers** in `utils/testing.py`: `run_test` and `assert_check_partials` rewritten
-  for the OM4 `check_partials`, plus per-component FD/CS step overrides to replace
+  for the OM4 `check_partials`, plus `check_partials_options` on components to replace
   `set_check_partial_options`.
 - A small `oas_component` helper or base class if the repeated mesh-shape bookkeeping
   (`nx`, `ny` derived from `surface.mesh`) proves worth sharing. Decide after porting the
@@ -120,8 +120,8 @@ Port `examples/` and the docs scripts last. Then work through the deferred list 
 - **D2. API compatibility.** **Recommend breaking the OM3-style API** (like dymos4) but keeping
   the physics, variable names, and promoted names identical, so test reference values carry
   over unchanged. Keep the package name `openaerostruct`.
-- **D3. `method="cs"` partials.** OM4 has no per-subjac approximation, and `FEATURES.md` marks
-  complex step 🔴/partial. Options per component: (a) component-level `differentiator="cs"`;
+- **D3. `method="cs"` partials.** OM4 has no per-subjac approximation and we will not ask for one (N-002 closed 2026-10-13): each component uses a single differentiator.
+  `FEATURES.md` marks complex step 🔴/partial. Options per component: (a) component-level `differentiator="cs"`;
   (b) derive analytic partials; (c) rewrite as `JaxExplicitComp` (asdex sparsity). **Recommend
   (a) for components that are fully CS today** (`fuel_loads`, `fuel_vol`,
   `section_properties_wingbox`, `tsaiwu_wingbox`, point-mass/thrust loads), **and (b) for the
