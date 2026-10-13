@@ -45,7 +45,6 @@ porting conventions follow dymos4 (`../dymos4.git/ai/ARCHITECTURE.md`). Plan:
 | ADL-002 | OAS-local `BsplineComp` replaces OM3 `SplineComp(method="bsplines")` (N-001) | om4 has no SplineComp |
 | ADL-003 | Approximated partials (N-002): each component gets a single differentiator. Components that were fully CS/FD use component-level `differentiator="cs"`; mixed components get analytic partials for every pair | om4 has no per-subjac approximation, and Robert decided (2026-10-13) not to ask for one. Rejected: component-level CS for mixed components, which would approximate the analytic blocks too (and see N-009 for large components) |
 | ADL-005 | `VarDecl`/`PartialsBuffer` porting aids rather than rewriting every declaration and subjac fill by hand | Keeps the OM3 math and sparsity code verbatim, which is what makes the diff reviewable and the cross-checks meaningful. Neither is a run-time OM3 emulation: components still have typed fields and no `options`. Rejected: an `options`/`add_input` shim on the component itself (the user ruled this out) |
-| ADL-006 | `VortexMesh.alpha` takes deg (TD-101) | om4 B-008 gives wrong totals for mixed-unit promoted inputs |
 | ADL-004 | Spline outputs are 1-D `(n,)` rather than OM3's `(vec_size=1, n)` | Every OAS consumer declares 1-D inputs. OM3 tolerated the shape mismatch; om4 does not |
 
 ## Deferred (not in first pass)

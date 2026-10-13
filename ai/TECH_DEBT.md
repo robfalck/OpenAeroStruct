@@ -21,7 +21,6 @@ step; **Low** = tidiness.
 
 | ID | Deviation | Severity | Why / follow-up |
 |---|---|---|---|
-| TD-101 | `VortexMesh` input `alpha` is in **deg** (OM3: rad) | Low | Works around OM4_NEEDS B-008 (wrong totals across mixed-unit promoted inputs). The promoted `alpha` is unchanged for users, but anyone connecting directly to `aero_states.alpha` with ground effect sees the unit change. Revert once B-008 is fixed upstream |
 | TD-102 | `Geometry` passes control-point values into `BsplineComp(cp_val=...)` as well as `input_defaults` | Low | Works around OM4_NEEDS B-005 (`InputDefault.val` ignored). Harmless once fixed |
 | TD-103 | Spline outputs are 1-D `(n,)` rather than OM3's `(1, n)` | Low | ADL-004. Scripts that index `twist[0, :]` need updating |
 | TD-104 | `set_check_partial_options(wrt=...)` becomes a component-wide `check_partials_options` | Low | OM4_NEEDS N-004. The check differentiator is chosen per component, not per `wrt`, so a component with one FD-only input is checked with FD for all of them |

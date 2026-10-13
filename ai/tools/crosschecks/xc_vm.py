@@ -1,5 +1,3 @@
-# NOTE: since TD-101, VortexMesh takes alpha in deg while OM3 takes rad, so the ground-effect
-# VortexMesh rows here are expected to differ; ground effect is verified end to end by xc_aeropoint.py.
 import sys, numpy as np
 sys.path.insert(0, "ai/tools")
 from om3_crosscheck import om3_oas, crosscheck, random_inputs, report
