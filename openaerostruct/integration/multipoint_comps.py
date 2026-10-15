@@ -1,19 +1,35 @@
-import openmdao.api as om
+from typing import Any
+
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
 
 
 class MultiCD(om.ExplicitComponent):
-    def initialize(self):
-        self.options.declare("n_points", types=int)
+    """Sum the drag coefficients of `n_points` flight points."""
 
-    def setup(self):
-        self.n_points = self.options["n_points"]
+    n_points: int
+
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data
+
+        for i in range(f["n_points"]):
+            d.add_input(str(i) + "_CD", val=0.0, units=None)
+
+        d.add_output("CD", val=0.0, units=None)
+        d.declare_partials("*", "*", val=1.0)
+        return d.into(_spec)
+
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        CD = 0.0
         for i in range(self.n_points):
-            self.add_input(str(i) + "_CD", val=0.0)
-
-        self.add_output("CD", val=0.0)
-        self.declare_partials("*", "*", val=1.0)
-
-    def compute(self, inputs, outputs):
-        outputs["CD"] = 0.0
-        for i in range(self.n_points):
-            outputs["CD"] += inputs[str(i) + "_CD"]
+            CD = CD + inputs[str(i) + "_CD"]
+        outputs["CD"] = CD

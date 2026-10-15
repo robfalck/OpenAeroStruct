@@ -1,12 +1,14 @@
-from openmdao.utils.assert_utils import assert_near_equal
+import om4.api as om
+from om4.variables.design_var import DesignVar
+from om4.variables.response import Constraint, Objective
+from om4.transforms.transform import AffineTransform
+from om4.utils.assert_utils import assert_near_equal
 import unittest
 
 
 class Test(unittest.TestCase):
     def test(self):
         import numpy as np
-
-        import openmdao.api as om
 
         from openaerostruct.meshing.mesh_generator import generate_mesh
         from openaerostruct.geometry.geometry_group import Geometry
@@ -53,67 +55,72 @@ class Test(unittest.TestCase):
         }
 
         # Create the OpenMDAO problem
-        prob = om.Problem()
+        subsystems = {}
+        connections = []
 
         # Create an independent variable component that will supply the flow
         # conditions to the problem.
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("v", val=248.136, units="m/s")
-        indep_var_comp.add_output("alpha", val=5.0, units="deg")
-        indep_var_comp.add_output("Mach_number", val=0.84)
-        indep_var_comp.add_output("re", val=1.0e6, units="1/m")
-        indep_var_comp.add_output("rho", val=0.38, units="kg/m**3")
-        indep_var_comp.add_output("cg", val=np.zeros((3)), units="m")
 
         # Add this IndepVarComp to the problem model
-        prob.model.add_subsystem("prob_vars", indep_var_comp, promotes=["*"])
 
         # Create and add a group that handles the geometry for the
         # aerodynamic lifting surface
         geom_group = Geometry(surface=surface)
-        prob.model.add_subsystem(surface["name"], geom_group)
+        subsystems[surface["name"]] = geom_group
 
         # Create the aero point group, which contains the actual aerodynamic
         # analyses
-        aero_group = AeroPoint(surfaces=[surface])
+        aero_group = AeroPoint(surfaces=[surface], promotes_inputs=["v", "alpha", "Mach_number", "re", "rho", "cg"])
         point_name = "aero_point_0"
-        prob.model.add_subsystem(
-            point_name, aero_group, promotes_inputs=["v", "alpha", "Mach_number", "re", "rho", "cg"]
-        )
+        subsystems[point_name] = aero_group
 
         name = surface["name"]
 
         # Connect the mesh from the geometry component to the analysis point
-        prob.model.connect(name + ".mesh", point_name + "." + name + ".def_mesh")
+        connections.append(om.Connection(src=name + ".mesh", tgt=point_name + "." + name + ".def_mesh"))
 
         # Perform the connections with the modified names within the
         # 'aero_states' group.
-        prob.model.connect(name + ".mesh", point_name + ".aero_states." + name + "_def_mesh")
+        connections.append(om.Connection(src=name + ".mesh", tgt=point_name + ".aero_states." + name + "_def_mesh"))
 
-        prob.model.connect(name + ".t_over_c", point_name + "." + name + "_perf." + "t_over_c")
+        connections.append(om.Connection(src=name + ".t_over_c", tgt=point_name + "." + name + "_perf." + "t_over_c"))
 
         # Import the Scipy Optimizer and set the driver of the problem to use
         # it, which defaults to an SLSQP optimization method
-        prob.driver = om.ScipyOptimizeDriver()
-        prob.driver.options["tol"] = 1e-9
 
         # Setup problem and add design variables, constraint, and objective
-        prob.model.add_design_var("wing.twist_cp", lower=-10.0, upper=15.0)
-        prob.model.add_design_var("wing.chord_cp", lower=0.5, upper=1.5)
-        prob.model.add_design_var("wing.xshear_cp", lower=0.0, upper=1.0)
-        prob.model.add_design_var("wing.yshear_cp", lower=-1.0, upper=0.0)
-        prob.model.add_design_var("wing.zshear_cp", lower=-1.0, upper=1.0)
-        prob.model.add_constraint(point_name + ".wing_perf.CL", equals=0.5)
-        prob.model.add_objective(point_name + ".wing_perf.CD", scaler=1e4)
 
         # Set up and run the optimization problem
-        prob.setup()
+        prob = om.Problem(
+            model=om.Group(
+                subsystems=subsystems,
+                connections=connections,
+                design_vars={
+                    "wing.twist_cp": DesignVar(lower=-10.0, upper=15.0),
+                    "wing.chord_cp": DesignVar(lower=0.5, upper=1.5),
+                    "wing.xshear_cp": DesignVar(lower=0.0, upper=1.0),
+                    "wing.yshear_cp": DesignVar(lower=-1.0, upper=0.0),
+                    "wing.zshear_cp": DesignVar(lower=-1.0, upper=1.0),
+                },
+                constraints={point_name + ".wing_perf.CL": Constraint(equals=0.5)},
+                objectives={
+                    point_name + ".wing_perf.CD": Objective(transform=AffineTransform.from_scaler_adder(scaler=1e4))
+                },
+                optimizer=om.ScipyMinimizeOptimizer(tol=1e-9, optimizer="SLSQP"),
+            )
+        )
+        prob.set_val("v", 248.136, units="m/s")
+        prob.set_val("alpha", 5.0, units="deg")
+        prob.set_val("Mach_number", 0.84)
+        prob.set_val("re", 1.0e6, units="1/m")
+        prob.set_val("rho", 0.38, units="kg/m**3")
+        prob.set_val("cg", np.zeros((3)), units="m")
 
-        prob.run_driver()
+        prob.run_optimizer()
 
-        assert_near_equal(prob["aero_point_0.wing_perf.CD"][0], 0.02891508386825118, 1e-6)
-        assert_near_equal(prob["aero_point_0.wing_perf.CL"][0], 0.5, 1e-6)
-        assert_near_equal(prob["aero_point_0.CM"][1], -4.281635590978787, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_0.wing_perf.CD")[0], 0.02891508386825118, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_0.wing_perf.CL")[0], 0.5, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_0.CM")[1], -4.281635590978787, 1e-6)
 
 
 if __name__ == "__main__":

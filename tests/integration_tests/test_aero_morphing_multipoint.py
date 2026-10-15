@@ -1,4 +1,8 @@
-from openmdao.utils.assert_utils import assert_near_equal
+import om4.api as om
+from om4.variables.design_var import DesignVar
+from om4.variables.response import Constraint, Objective
+from om4.transforms.transform import AffineTransform
+from om4.utils.assert_utils import assert_near_equal
 import numpy as np
 import unittest
 
@@ -7,8 +11,6 @@ from openaerostruct.geometry.geometry_group import Geometry
 
 from openaerostruct.aerodynamics.aero_groups import AeroPoint
 from openaerostruct.integration.multipoint_comps import MultiCD
-
-import openmdao.api as om
 
 
 class Test(unittest.TestCase):
@@ -58,105 +60,87 @@ class Test(unittest.TestCase):
 
         n_points = 2
 
-        # Create the problem and the model group
-        prob = om.Problem()
-
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("v", val=248.136, units="m/s")
-        indep_var_comp.add_output("alpha", val=6.64, units="deg")
-        indep_var_comp.add_output("Mach_number", val=0.84)
-        indep_var_comp.add_output("re", val=1.0e6, units="1/m")
-        indep_var_comp.add_output("rho", val=0.38, units="kg/m**3")
-        indep_var_comp.add_output("cg", val=np.zeros((3)), units="m")
-
-        prob.model.add_subsystem("prob_vars", indep_var_comp, promotes=["*"])
-
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("t_over_c_cp", val=np.array([0.15]))
-        indep_var_comp.add_output("span", val=12.0, units="m")
-        indep_var_comp.add_output("twist_cp_0", val=np.zeros((5)), units="deg")
-        indep_var_comp.add_output("twist_cp_1", val=np.zeros((5)), units="deg")
-
-        prob.model.add_subsystem("geom_vars", indep_var_comp, promotes=["*"])
+        subsystems = {}
+        connections = []
 
         # Loop through and add a certain number of aero points
         for i in range(n_points):
-            # Create the aero point group and add it to the model
-            aero_group = AeroPoint(surfaces=surfaces)
+            # Each flight point gets its own geometry group so the wing can morph between points. The
+            # twist control points are separate design variables per point, and the other
+            # geometric inputs are shared.
             point_name = "aero_point_{}".format(i)
-            prob.model.add_subsystem(point_name, aero_group)
-
-            # Connect flow properties to the analysis point
-            prob.model.connect("v", point_name + ".v")
-            prob.model.connect("alpha", point_name + ".alpha")
-            prob.model.connect("Mach_number", point_name + ".Mach_number")
-            prob.model.connect("re", point_name + ".re")
-            prob.model.connect("rho", point_name + ".rho")
-            prob.model.connect("cg", point_name + ".cg")
+            subsystems[point_name] = AeroPoint(
+                surfaces=surfaces, promotes_inputs=["v", "alpha", "Mach_number", "re", "rho", "cg"]
+            )
 
             # Connect the parameters within the model for each aero point
             for surface in surfaces:
-                geom_group = Geometry(surface=surface, connect_geom_DVs=False)
-
-                # Add tmp_group to the problem as the name of the surface.
-                # Note that is a group and performance group for each
-                # individual surface.
-                aero_group.add_subsystem(surface["name"] + "_geom", geom_group)
-
                 name = surface["name"]
-                prob.model.connect(point_name + ".CD", "multi_CD." + str(i) + "_CD")
+                geom_name = point_name + "_" + name + "_geom"
+                subsystems[geom_name] = Geometry(
+                    surface=surface,
+                    connect_geom_DVs=False,
+                    promotes_inputs=[("twist_cp", "twist_cp_{}".format(i)), "t_over_c_cp", "span"],
+                )
+
+                connections.append(om.Connection(src=point_name + ".CD", tgt="multi_CD." + str(i) + "_CD"))
 
                 # Connect the mesh from the geometry component to the analysis point
-                prob.model.connect(point_name + "." + name + "_geom.mesh", point_name + "." + name + ".def_mesh")
+                connections.append(om.Connection(src=geom_name + ".mesh", tgt=point_name + "." + name + ".def_mesh"))
 
                 # Perform the connections with the modified names within the
                 # 'aero_states' group.
-                prob.model.connect(
-                    point_name + "." + name + "_geom.mesh", point_name + ".aero_states." + name + "_def_mesh"
+                connections.append(
+                    om.Connection(src=geom_name + ".mesh", tgt=point_name + ".aero_states." + name + "_def_mesh")
                 )
 
-                prob.model.connect(
-                    point_name + "." + name + "_geom.t_over_c", point_name + "." + name + "_perf." + "t_over_c"
+                connections.append(
+                    om.Connection(src=geom_name + ".t_over_c", tgt=point_name + "." + name + "_perf." + "t_over_c")
                 )
 
-        # Connect geometric design variables to each point
-        prob.model.connect("t_over_c_cp", "aero_point_0.wing_geom.t_over_c_cp")
-        prob.model.connect("t_over_c_cp", "aero_point_1.wing_geom.t_over_c_cp")
-
-        prob.model.connect("span", "aero_point_0.wing_geom.span")
-        prob.model.connect("span", "aero_point_1.wing_geom.span")
-
-        prob.model.connect("twist_cp_0", "aero_point_0.wing_geom.twist_cp")
-        prob.model.connect("twist_cp_1", "aero_point_1.wing_geom.twist_cp")
-
-        prob.model.add_subsystem("multi_CD", MultiCD(n_points=n_points), promotes_outputs=["CD"])
-
-        prob.driver = om.ScipyOptimizeDriver()
-        prob.driver.options["tol"] = 1e-9
-
-        # # Setup problem and add design variables, constraint, and objective
-        prob.model.add_design_var("alpha", lower=-15, upper=15)
-
-        prob.model.add_design_var("twist_cp_0", lower=-5, upper=8)
-        prob.model.add_design_var("twist_cp_1", lower=-5, upper=8)
-
-        prob.model.add_design_var("span", lower=2, upper=15)
-
-        prob.model.add_constraint("aero_point_0.wing_perf.CL", equals=0.45)
-        prob.model.add_constraint("aero_point_1.wing_perf.CL", equals=0.50)
-
-        prob.model.add_objective("CD", scaler=1e4)
+        subsystems["multi_CD"] = MultiCD(n_points=n_points, promotes_outputs=["CD"])
 
         # Set up the problem
-        prob.setup()
+        prob = om.Problem(
+            model=om.Group(
+                subsystems=subsystems,
+                connections=connections,
+                design_vars={
+                    "alpha": DesignVar(lower=-15, upper=15),
+                    "twist_cp_0": DesignVar(lower=-5, upper=8),
+                    "twist_cp_1": DesignVar(lower=-5, upper=8),
+                    "span": DesignVar(lower=2, upper=15),
+                },
+                constraints={
+                    "aero_point_0.wing_perf.CL": Constraint(equals=0.45),
+                    "aero_point_1.wing_perf.CL": Constraint(equals=0.50),
+                },
+                objectives={"CD": Objective(transform=AffineTransform.from_scaler_adder(scaler=1e4))},
+                optimizer=om.ScipyMinimizeOptimizer(optimizer="SLSQP", tol=1e-9),
+            )
+        )
+        prob.set_val("v", 248.136, units="m/s")
+        prob.set_val("alpha", 6.64, units="deg")
+        prob.set_val("Mach_number", 0.84)
+        prob.set_val("re", 1.0e6, units="1/m")
+        prob.set_val("rho", 0.38, units="kg/m**3")
+        prob.set_val("cg", np.zeros((3)), units="m")
+        prob.set_val("t_over_c_cp", np.array([0.15]))
+        prob.set_val("span", 12.0, units="m")
+        prob.set_val("twist_cp_0", np.zeros((5)), units="deg")
+        prob.set_val("twist_cp_1", np.zeros((5)), units="deg")
 
-        prob.run_driver()
+        prob.run_optimizer()
 
-        assert_near_equal(prob["aero_point_0.wing_perf.CL"][0], 0.45, 1e-6)
-        assert_near_equal(prob["aero_point_1.wing_perf.CL"][0], 0.5, 1e-6)
-        assert_near_equal(prob["twist_cp_0"], np.array([8.0, -1.28899415, -2.57798831, -1.28899415, -0.96161429]), 1e-6)
-        assert_near_equal(prob["twist_cp_1"], np.array([8.0, -0.02636487, -0.05272973, -0.02636487, 0.7889681]), 1e-6)
-        assert_near_equal(prob["aero_point_1.wing_perf.CL"][0], 0.5, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_0.wing_perf.CL")[0], 0.45, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_1.wing_perf.CL")[0], 0.5, 1e-6)
+        assert_near_equal(
+            prob.get_val("twist_cp_0"), np.array([8.0, -1.28899415, -2.57798831, -1.28899415, -0.96161429]), 1e-6
+        )
+        assert_near_equal(
+            prob.get_val("twist_cp_1"), np.array([8.0, -0.02636487, -0.05272973, -0.02636487, 0.7889681]), 1e-6
+        )
+        assert_near_equal(prob.get_val("aero_point_1.wing_perf.CL")[0], 0.5, 1e-6)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,9 @@
-from openmdao.utils.assert_utils import assert_near_equal
+import om4.api as om
+from om4.variables.design_var import DesignVar
+from om4.variables.response import Constraint, Objective
+from om4.transforms.transform import AffineTransform
+from om4.utils.promotion import PromotesSpec
+from om4.utils.assert_utils import assert_near_equal
 import unittest
 
 
@@ -6,7 +11,6 @@ class Test(unittest.TestCase):
     def test(self):
         # docs checkpoint 0
         import numpy as np
-        import openmdao.api as om
 
         from openaerostruct.meshing.mesh_generator import generate_mesh
         from openaerostruct.geometry.geometry_group import Geometry
@@ -57,18 +61,8 @@ class Test(unittest.TestCase):
 
         n_points = 2
 
-        # Create the problem and the model group
-        prob = om.Problem()
-
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("v", val=248.136, units="m/s")
-        indep_var_comp.add_output("alpha", val=np.ones(n_points) * 6.64, units="deg")
-        indep_var_comp.add_output("Mach_number", val=0.84)
-        indep_var_comp.add_output("re", val=1.0e6, units="1/m")
-        indep_var_comp.add_output("rho", val=0.38, units="kg/m**3")
-        indep_var_comp.add_output("cg", val=np.zeros((3)), units="m")
-
-        prob.model.add_subsystem("prob_vars", indep_var_comp, promotes=["*"])
+        subsystems = {}
+        connections = []
 
         # Loop over each surface and create the geometry groups
         for surface in surfaces:
@@ -77,63 +71,77 @@ class Test(unittest.TestCase):
             geom_group = Geometry(surface=surface)
 
             # Add geom_group to the problem with the name of the surface.
-            prob.model.add_subsystem(name + "_geom", geom_group)
+            subsystems[name + "_geom"] = geom_group
 
         # Loop through and add a certain number of aero points
         for i in range(n_points):
-            # Create the aero point group and add it to the model
-            aero_group = AeroPoint(surfaces=surfaces)
+            # Create the aero point group and add it to the model. Each point takes one entry of the
+            # promoted alpha vector.
             point_name = "aero_point_{}".format(i)
-            prob.model.add_subsystem(point_name, aero_group)
-
-            # Connect flow properties to the analysis point
-            prob.model.connect("v", point_name + ".v")
-            prob.model.connect("alpha", point_name + ".alpha", src_indices=[i])
-            prob.model.connect("Mach_number", point_name + ".Mach_number")
-            prob.model.connect("re", point_name + ".re")
-            prob.model.connect("rho", point_name + ".rho")
-            prob.model.connect("cg", point_name + ".cg")
+            subsystems[point_name] = AeroPoint(
+                surfaces=surfaces,
+                promotes_inputs=[
+                    "v",
+                    "Mach_number",
+                    "re",
+                    "rho",
+                    "cg",
+                    PromotesSpec(patterns=["alpha"], src_indices=[i], src_shape=(n_points,)),
+                ],
+            )
 
             # Connect the parameters within the model for each aero point
             for surface in surfaces:
                 name = surface["name"]
 
                 # Connect the drag coeff at each point to the multi_CD component, which does the summation.
-                prob.model.connect(point_name + ".CD", "multi_CD." + str(i) + "_CD")
+                connections.append(om.Connection(src=point_name + ".CD", tgt="multi_CD." + str(i) + "_CD"))
 
                 # Connect the mesh from the geometry component to the analysis point
-                prob.model.connect(name + "_geom.mesh", point_name + "." + name + ".def_mesh")
+                connections.append(om.Connection(src=name + "_geom.mesh", tgt=point_name + "." + name + ".def_mesh"))
 
                 # Perform the connections with the modified names within the 'aero_states' group.
-                prob.model.connect(name + "_geom.mesh", point_name + ".aero_states." + name + "_def_mesh")
-                prob.model.connect(name + "_geom.t_over_c", point_name + "." + name + "_perf." + "t_over_c")
+                connections.append(
+                    om.Connection(src=name + "_geom.mesh", tgt=point_name + ".aero_states." + name + "_def_mesh")
+                )
+                connections.append(
+                    om.Connection(src=name + "_geom.t_over_c", tgt=point_name + "." + name + "_perf." + "t_over_c")
+                )
 
-        prob.model.add_subsystem("multi_CD", MultiCD(n_points=n_points), promotes_outputs=["CD"])
+        subsystems["multi_CD"] = MultiCD(n_points=n_points, promotes_outputs=["CD"])
 
-        prob.driver = om.ScipyOptimizeDriver()
-        prob.driver.options["tol"] = 1e-9
+        # Design variables are the wing twist and angle-of-attack at each point. Each point has a
+        # different target CL, and the objective is the sum of CDs at each point.
+        prob = om.Problem(
+            model=om.Group(
+                subsystems=subsystems,
+                connections=connections,
+                design_vars={
+                    "alpha": DesignVar(lower=-15, upper=15),
+                    "wing_geom.twist_cp": DesignVar(lower=-5, upper=8),
+                },
+                constraints={
+                    "aero_point_0.wing_perf.CL": Constraint(equals=0.45),
+                    "aero_point_1.wing_perf.CL": Constraint(equals=0.5),
+                },
+                objectives={"CD": Objective(transform=AffineTransform.from_scaler_adder(scaler=1e4))},
+                optimizer=om.ScipyMinimizeOptimizer(optimizer="SLSQP", tol=1e-9),
+            )
+        )
+        prob.set_val("v", 248.136, units="m/s")
+        prob.set_val("alpha", np.ones(n_points) * 6.64, units="deg")
+        prob.set_val("Mach_number", 0.84)
+        prob.set_val("re", 1.0e6, units="1/m")
+        prob.set_val("rho", 0.38, units="kg/m**3")
+        prob.set_val("cg", np.zeros((3)), units="m")
 
-        # Setup problem and add design variables, constraint, and objective
-        # design variables are the wing twist and angle-of-attack at each point.
-        prob.model.add_design_var("alpha", lower=-15, upper=15)
-        prob.model.add_design_var("wing_geom.twist_cp", lower=-5, upper=8)
-
-        # set different target CL value at each point.
-        prob.model.add_constraint("aero_point_0.wing_perf.CL", equals=0.45)
-        prob.model.add_constraint("aero_point_1.wing_perf.CL", equals=0.5)
-
-        # objective is the sum of CDs at each point.
-        prob.model.add_objective("CD", scaler=1e4)
-
-        # Set up the problem and run optimization.
-        prob.setup()
-        prob.run_driver()
+        prob.run_optimizer()
         # docs checkpoint 1
 
-        assert_near_equal(prob["aero_point_0.wing_perf.CL"][0], 0.45, 1e-6)
-        assert_near_equal(prob["aero_point_0.wing_perf.CD"][0], 0.030502881726099183, 1e-6)
-        assert_near_equal(prob["aero_point_1.wing_perf.CL"][0], 0.5, 1e-6)
-        assert_near_equal(prob["aero_point_1.wing_perf.CD"][0], 0.03195303546890328, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_0.wing_perf.CL")[0], 0.45, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_0.wing_perf.CD")[0], 0.030502881726099183, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_1.wing_perf.CL")[0], 0.5, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_1.wing_perf.CD")[0], 0.03195303546890328, 1e-6)
 
 
 if __name__ == "__main__":
