@@ -2,9 +2,6 @@ import unittest
 
 import numpy as np
 
-import openmdao.api as om
-from openmdao.utils.assert_utils import assert_check_partials
-
 from openaerostruct.aerodynamics.mesh_point_forces import MeshPointForces
 from openaerostruct.meshing.mesh_generator import generate_mesh
 from openaerostruct.utils.testing import run_test, get_default_surfaces
@@ -41,20 +38,11 @@ class Test(unittest.TestCase):
         # surfaces = get_default_surfaces()
         surfaces = [surface]
 
-        prob = om.Problem()
-        group = prob.model
-
         comp = MeshPointForces(surfaces=surfaces)
-        group.add_subsystem("comp", comp)
 
-        prob.setup()
+        values = {"comp.wing_sec_forces": rng.random(comp.inputs["wing_sec_forces"].val.shape)}
 
-        prob["comp.wing_sec_forces"] = rng.random(prob["comp.wing_sec_forces"].shape)
-
-        prob.run_model()
-
-        check = prob.check_partials(compact_print=True)
-        assert_check_partials(check, atol=3e-5, rtol=1e-5)
+        run_test(self, comp, atol=3e-5, rtol=1e-5, values=values)
 
 
 if __name__ == "__main__":

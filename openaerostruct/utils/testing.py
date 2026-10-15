@@ -42,6 +42,27 @@ def assert_check_partials(results, atol=1e-5, rtol=1e-5):
     raise AssertionError("\n".join(lines))
 
 
+def assert_near_equal(actual, desired, tolerance=1e-15):
+    """
+    Assert that ``actual`` matches ``desired`` in the norm-wise relative sense used by OM3.
+
+    The error is ``norm(actual - desired) / norm(desired)``, or the absolute norm when
+    ``desired`` is zero.  Shapes must match.
+    """
+    actual = np.asarray(actual)
+    desired = np.asarray(desired)
+    if actual.shape != desired.shape:
+        raise AssertionError(f"shape mismatch: actual {actual.shape} vs desired {desired.shape}")
+    err = np.linalg.norm(actual - desired)
+    norm = np.linalg.norm(desired)
+    if norm != 0.0:
+        err /= norm
+    if not err <= tolerance:
+        raise AssertionError(
+            f"relative error {err:.3e} exceeds tolerance {tolerance:.3e}\nactual: {actual}\ndesired: {desired}"
+        )
+
+
 def dense_fd_partials(prob, comp_path="comp", step=1e-6):
     """
     Return the dense forward-difference Jacobian of an explicit component's outputs wrt its inputs.
@@ -89,6 +110,8 @@ def assert_sparsity_complete(test_obj, prob, comp_path="comp", step=1e-6, atol=1
             msg=f"{comp_path}: d({key[0]})/d({key[1]}) differs from dense FD at {np.argwhere(bad)[:5].tolist()} "
             f"(max |diff| {np.max(np.abs(j_an - j_fd)):.3e}); missing or wrong declared partials?",
         )
+
+
 def view_mat(mat1, mat2=None, key="Title", tol=1e-10):  # pragma: no cover
     """
     Helper function used to visually examine matrices. It plots mat1 and mat2 side by side,
@@ -166,6 +189,7 @@ def run_test(
     rtol=1e-5,
     view=False,
     reports=False,
+    values=None,
 ):
     """
     Wrap ``comp`` in a Problem, run it, and assert its partials against FD or CS.
@@ -173,8 +197,13 @@ def run_test(
     ``complex_flag``, ``compact_print`` and ``reports`` are accepted for call-site
     compatibility with the OM3 helper and are ignored: om4 allocates complex storage
     locally at the CS node (no ``force_alloc_complex``) and has no reports system.
+
+    ``values`` is an optional ``{name: value}`` dict applied with ``Problem.set_val``
+    (names relative to the wrapper, e.g. ``"comp.beta"``) before the model runs.
     """
     prob = om.Problem(model=om.Group(subsystems={"comp": comp}))
+    for name, val in (values or {}).items():
+        prob.set_val(name, val)
     prob.run_model()
 
     if method == "cs":
