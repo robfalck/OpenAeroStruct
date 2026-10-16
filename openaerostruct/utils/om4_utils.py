@@ -16,7 +16,7 @@ def field_values(cls, data: dict[str, Any]) -> SimpleNamespace:
     Before-validators build ``inputs``/``outputs``/``partials`` from the semantic fields, but
     run before field validation, so ``data`` only holds what the caller passed.  This fills
     the gaps from the field defaults (so defaults are not repeated in the validator) and
-    coerces ``surface``/``surfaces`` to ``Surface`` in place, so the validator and the field
+    coerces ``surface``/``surfaces``/``sections`` to ``Surface`` in place, so the validator and the field
     see the same object.
 
     Parameters
@@ -24,7 +24,7 @@ def field_values(cls, data: dict[str, Any]) -> SimpleNamespace:
     cls : type
         The component or group class being validated.
     data : dict
-        The raw constructor data; modified in place for ``surface``/``surfaces``.
+        The raw constructor data; modified in place for ``surface``/``surfaces``/``sections``.
 
     Returns
     -------
@@ -33,8 +33,9 @@ def field_values(cls, data: dict[str, Any]) -> SimpleNamespace:
     """
     if "surface" in data and not isinstance(data["surface"], Surface):
         data["surface"] = Surface.model_validate(data["surface"])
-    if "surfaces" in data:
-        data["surfaces"] = [s if isinstance(s, Surface) else Surface.model_validate(s) for s in data["surfaces"]]
+    for key in ("surfaces", "sections"):
+        if key in data:
+            data[key] = [s if isinstance(s, Surface) else Surface.model_validate(s) for s in data[key]]
 
     vals = {}
     for name, field in cls.model_fields.items():

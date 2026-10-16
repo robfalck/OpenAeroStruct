@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class MonotonicConstraint(om.ExplicitComponent):
@@ -20,45 +26,48 @@ class MonotonicConstraint(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("var_name", types=str)
-        self.options.declare("surface", types=dict)
+    var_name: str
+    surface: Surface
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
-        self.var_name = self.options["var_name"]
-        self.con_name = "monotonic_" + self.var_name
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        symmetry = f.surface["symmetry"]
+        ny = f.surface["mesh"].shape[1]
+        con_name = "monotonic_" + f.var_name
+        d = VarDecl()
 
-        self.symmetry = surface["symmetry"]
-        self.ny = surface["mesh"].shape[1]
+        d.add_input(f.var_name, val=np.zeros(ny))
+        d.add_output(con_name, val=np.zeros(ny - 1))
 
-        self.add_input(self.var_name, val=np.zeros(self.ny))
-        self.add_output(self.con_name, val=np.zeros(self.ny - 1))
-
-        rows = np.arange(0, self.ny - 1)
+        rows = np.arange(0, ny - 1)
         rows = np.vstack((rows, rows)).flatten(order="F")
 
-        cols = np.arange(1, self.ny - 1)
+        cols = np.arange(1, ny - 1)
         cols = np.vstack((cols, cols)).flatten(order="F")
         cols = np.insert(cols, 0, 0)
-        cols = np.append(cols, self.ny - 1)
+        cols = np.append(cols, ny - 1)
 
         sparse_val = np.ones_like(rows)
         sparse_val[1::2] = -1
-        if not self.symmetry:
-            if self.ny % 2 == 0:
-                sparse_val[self.ny - 2 :] *= -1
+        if not symmetry:
+            if ny % 2 == 0:
+                sparse_val[ny - 2 :] *= -1
             else:
-                sparse_val[self.ny - 1 :] *= -1
+                sparse_val[ny - 1 :] *= -1
 
-        self.declare_partials(self.con_name, self.var_name, rows=rows, cols=cols, val=sparse_val)
+        d.declare_partials(con_name, f.var_name, rows=rows, cols=cols, val=sparse_val)
+        return d.into(data)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         # Compute the difference between adjacent variable values
-        diff = inputs[self.var_name][:-1] - inputs[self.var_name][1:]
-        if self.symmetry:
-            outputs[self.con_name] = diff
+        x = inputs[self.var_name]
+        diff = x[:-1] - x[1:]
+        if self.surface["symmetry"]:
+            outputs["monotonic_" + self.var_name] = diff
         else:
-            ny2 = (self.ny - 1) // 2
-            outputs[self.con_name][:ny2] = diff[:ny2]
-            outputs[self.con_name][ny2:] = -diff[ny2:]
+            ny2 = (x.size - 1) // 2
+            outputs["monotonic_" + self.var_name] = np.concatenate([diff[:ny2], -diff[ny2:]])

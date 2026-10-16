@@ -1,5 +1,80 @@
+from typing import Any
+
 import numpy as np
-import openmdao.api as om
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
+
+
+def compute_uni_mesh_dims(sections):
+    """
+    Compute the dimensions of the unified mesh as well as an index array.
+
+    Parameters
+    ----------
+    sections : list
+        List of section OpenAeroStruct surface dictionaries
+
+    Returns
+    -------
+    uni_mesh_indices : numpy array
+        Array of indicies matching the size of the mesh array
+    uni_nx : int
+        Number of chordwise points in the unified mesh
+    uni_ny : int
+        Number of spanwise points in the unified mesh
+    """
+    uni_nx = sections[0]["mesh"].shape[0]
+    uni_ny = 0
+    for i_sec in range(len(sections)):
+        if i_sec == len(sections) - 1:
+            uni_ny += sections[i_sec]["mesh"].shape[1]
+        else:
+            uni_ny += sections[i_sec]["mesh"].shape[1] - 1
+    uni_mesh_indices = np.arange(uni_nx * uni_ny * 3).reshape((uni_nx, uni_ny, 3))
+
+    return uni_mesh_indices, uni_nx, uni_ny
+
+
+def compute_uni_mesh_index_blocks(sections, uni_mesh_indices):
+    """
+    Compute the index block that corresponds to each individual wing section.
+
+    Parameters
+    ----------
+    sections : list
+        List of section OpenAeroStruct surface dictionaries
+    uni_mesh_indices : numpy array
+        Array of indicies matching the size of the mesh array
+
+    Returns
+    -------
+    blocks : list
+        List of numpy arrays containing the incidies corresponding to each section. Basically breaks the uni_mesh_indices
+        array up into pieces that correspond to each section.
+    """
+    blocks = []
+
+    # cursor to track the y position of each section along the unified mesh
+    y_curr = 0
+
+    for i_sec in range(len(sections)):
+        mesh = sections[i_sec]["mesh"]
+        ny = mesh.shape[1]
+
+        if i_sec == len(sections) - 1:
+            block = uni_mesh_indices[:, y_curr:, :]
+            y_curr += ny
+        else:
+            block = uni_mesh_indices[:, y_curr : y_curr + (ny - 1), :]
+            y_curr += ny - 1
+
+        blocks.append(block.flatten())
+
+    return blocks
 
 
 class GeomMultiUnification(om.ExplicitComponent):
@@ -33,94 +108,24 @@ class GeomMultiUnification(om.ExplicitComponent):
         Nodal mesh defining the unified surface
     """
 
-    def initialize(self):
-        """
-        Declare options.
-        """
-        self.options.declare("sections", types=list, desc="A list of section surface dictionaries to be unified.")
-        self.options.declare("surface_name", types=str, desc="The name of the multi-section surface.")
-        self.options.declare(
-            "shift_uni_mesh",
-            types=bool,
-            default=True,
-            desc="Flag that shifts sections so that their leading edges are coincident.",
-        )
+    sections: list[Surface]
+    surface_name: str
+    shift_uni_mesh: bool = True
 
-    def compute_uni_mesh_dims(self, sections):
-        """
-        Function computes the dimensions of the unified mesh as well as an index array
-
-        Parameters
-        ----------
-        sections : list
-            List of section OpenAeroStruct surface dictionaries
-
-        Returns
-        -------
-        uni_mesh_indices : numpy array
-            Array of indicies matching the size of the mesh array
-        uni_nx : int
-            Number of chordwise points in the unified mesh
-        uni_ny : int
-            Number of spanwise points in the unified mesh
-        """
-        uni_nx = sections[0]["mesh"].shape[0]
-        uni_ny = 0
-        for i_sec in range(len(sections)):
-            if i_sec == len(sections) - 1:
-                uni_ny += sections[i_sec]["mesh"].shape[1]
-            else:
-                uni_ny += sections[i_sec]["mesh"].shape[1] - 1
-        uni_mesh_indices = np.arange(uni_nx * uni_ny * 3).reshape((uni_nx, uni_ny, 3))
-
-        return uni_mesh_indices, uni_nx, uni_ny
-
-    def compute_uni_mesh_index_blocks(self, sections, uni_mesh_indices):
-        """
-        Function that computes the index block that corresponds to each individual wing section
-
-        Parameters
-        ----------
-        sections : list
-            List of section OpenAeroStruct surface dictionaries
-        uni_mesh_indices : numpy array
-            Array of indicies matching the size of the mesh array
-
-        Returns
-        -------
-        blocks : list
-            List of numpy arrays containing the incidies corresponding to each section. Basically breaks the uni_mesh_indices
-            array up into pieces that correspond to each section.
-        """
-        blocks = []
-
-        # cursor to track the y position of each section along the unified mesh
-        y_curr = 0
-
-        for i_sec in range(len(sections)):
-            mesh = sections[i_sec]["mesh"]
-            ny = mesh.shape[1]
-
-            if i_sec == len(sections) - 1:
-                block = uni_mesh_indices[:, y_curr:, :]
-                y_curr += ny
-            else:
-                block = uni_mesh_indices[:, y_curr : y_curr + (ny - 1), :]
-                y_curr += ny - 1
-
-            blocks.append(block.flatten())
-
-        return blocks
-
-    def setup(self):
-        sections = self.options["sections"]
-        name = self.options["surface_name"]
-        shift_uni_mesh = self.options["shift_uni_mesh"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        sections = f.sections
+        shift_uni_mesh = f.shift_uni_mesh
+        d = VarDecl()
 
         # Get the unified mesh size, index array, and block of indicies for each section
-        [uni_mesh_indices, uni_nx, uni_ny] = self.compute_uni_mesh_dims(sections)
-        uni_mesh_blocks = self.compute_uni_mesh_index_blocks(sections, uni_mesh_indices)
-        uni_mesh_name = "{}_uni_mesh".format(name)
+        [uni_mesh_indices, uni_nx, uni_ny] = compute_uni_mesh_dims(sections)
+        uni_mesh_blocks = compute_uni_mesh_index_blocks(sections, uni_mesh_indices)
+        uni_mesh_name = "{}_uni_mesh".format(f.surface_name)
 
         # Loop through each section to build the sparsity pattern for the Jacobian. This Jacobian is fixed based on the mesh size so can be declared here
         for i_sec, section in enumerate(sections):
@@ -131,7 +136,7 @@ class GeomMultiUnification(om.ExplicitComponent):
 
             mesh_name = "{}_def_mesh".format(name)
 
-            self.add_input(mesh_name, shape=(nx, ny, 3), units="m", tags=["mphys_coupling"])
+            d.add_input(mesh_name, shape=(nx, ny, 3), units="m", tags=["mphys_coupling"])
 
             # Generate index array
             mesh_indices = np.arange(nx * ny * 3).reshape((nx, ny, 3))
@@ -146,7 +151,7 @@ class GeomMultiUnification(om.ExplicitComponent):
             rows = uni_mesh_blocks[i_sec]
 
             # Fill non zero Jacobian entries with ones
-            data = np.ones_like(rows)
+            vals = np.ones_like(rows)
 
             if shift_uni_mesh:
                 # Update sparsity pattern for any possible uni_mesh shifting/translating(i.e span scalar changes)
@@ -157,7 +162,7 @@ class GeomMultiUnification(om.ExplicitComponent):
                     # The unified mesh up to and including this point is sensitive to the right tip of the first section
                     cols = np.concatenate([cols, np.tile(mesh_indices[0, -1, :].flatten(), len(acc_mesh) // 3)])
                     rows = np.concatenate([rows, acc_mesh])
-                    data = np.concatenate([data, -1 * np.ones_like(acc_mesh)])
+                    vals = np.concatenate([vals, -1 * np.ones_like(acc_mesh)])
                 elif i_sec == len(sections) - 1:
                     # Concatenate the unified mesh jacobian row up including the current section
                     acc_mesh = np.concatenate(uni_mesh_blocks[:i_sec])
@@ -165,7 +170,7 @@ class GeomMultiUnification(om.ExplicitComponent):
                     # The unified mesh up including this point is sensitive to the left tip of the last section
                     cols = np.concatenate([cols, np.tile(mesh_indices[0, 0, :].flatten(), len(acc_mesh) // 3)])
                     rows = np.concatenate([rows, acc_mesh])
-                    data = np.concatenate([data, np.ones_like(acc_mesh)])
+                    vals = np.concatenate([vals, np.ones_like(acc_mesh)])
                 else:
                     # Concatenate the unified mesh jacobian rows up to but not including the current section
                     acc_mesh = np.concatenate(uni_mesh_blocks[:i_sec])
@@ -173,7 +178,7 @@ class GeomMultiUnification(om.ExplicitComponent):
                     # The unified mesh up to and not including this point is sensitive to the left tip of the section
                     cols = np.concatenate([cols, np.tile(mesh_indices[0, 0, :].flatten(), len(acc_mesh) // 3)])
                     rows = np.concatenate([rows, acc_mesh])
-                    data = np.concatenate([data, np.ones_like(acc_mesh)])
+                    vals = np.concatenate([vals, np.ones_like(acc_mesh)])
 
                     # Concatenate the unified mesh jacobian row up to an including the current section
                     acc_mesh = np.concatenate([acc_mesh, uni_mesh_blocks[i_sec]])
@@ -181,35 +186,36 @@ class GeomMultiUnification(om.ExplicitComponent):
                     # The unified mesh up to and including this point is sensitive to the right tip of the section
                     cols = np.concatenate([cols, np.tile(mesh_indices[0, -1, :].flatten(), len(acc_mesh) // 3)])
                     rows = np.concatenate([rows, acc_mesh])
-                    data = np.concatenate([data, -1 * np.ones_like(acc_mesh)])
+                    vals = np.concatenate([vals, -1 * np.ones_like(acc_mesh)])
 
-            self.declare_partials(uni_mesh_name, mesh_name, val=data, rows=rows, cols=cols)
+            d.declare_partials(uni_mesh_name, mesh_name, val=vals, rows=rows, cols=cols)
 
-        self.add_output(uni_mesh_name, shape=(uni_nx, uni_ny, 3), units="m")
+        d.add_output(uni_mesh_name, shape=(uni_nx, uni_ny, 3), units="m")
 
         # Unify the t/c output of each section if that has been specified
         if "t_over_c_cp" in sections[0].keys():
-            uni_tc_name = "{}_uni_t_over_c".format(self.options["surface_name"])
+            uni_tc_name = "{}_uni_t_over_c".format(f.surface_name)
 
             n_acc = 0
             for section in sections:
                 name = section["name"]
                 t_over_c_name = "{}_t_over_c".format(name)
-                n = int(ny - 1)
-                self.add_input(t_over_c_name, shape=(n), tags=["mphys_coupling"])
+                n = int(section["mesh"].shape[1] - 1)
+                d.add_input(t_over_c_name, shape=(n), tags=["mphys_coupling"])
 
-                self.declare_partials(
+                d.declare_partials(
                     uni_tc_name, t_over_c_name, rows=np.arange(0, n) + n_acc, cols=np.arange(0, n), val=np.ones(n)
                 )
 
                 n_acc += n
 
-            self.add_output(uni_tc_name, shape=(uni_ny - 1))
+            d.add_output(uni_tc_name, shape=(uni_ny - 1))
+        return d.into(data)
 
-    def compute(self, inputs, outputs):
-        sections = self.options["sections"]
-        surface_name = self.options["surface_name"]
-        shift_uni_mesh = self.options["shift_uni_mesh"]
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        sections = self.sections
+        surface_name = self.surface_name
+        shift_uni_mesh = self.shift_uni_mesh
         uni_mesh_name = "{}_uni_mesh".format(surface_name)
 
         # Loop through all sections to unify the mesh
@@ -233,7 +239,7 @@ class GeomMultiUnification(om.ExplicitComponent):
                     uni_mesh = np.concatenate([uni_mesh, inputs[mesh_name][:, :-1, :]], axis=1)
 
         if "t_over_c_cp" in sections[0].keys():
-            uni_tc_name = "{}_uni_t_over_c".format(self.options["surface_name"])
+            uni_tc_name = "{}_uni_t_over_c".format(self.surface_name)
             for i_sec, section in enumerate(sections):
                 name = section["name"]
                 t_over_c_name = "{}_t_over_c".format(name)

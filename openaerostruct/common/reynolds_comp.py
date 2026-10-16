@@ -1,17 +1,31 @@
-import openmdao.api as om
+from typing import Any
+
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl
 
 
 class ReynoldsComp(om.ExplicitComponent):
-    def setup(self):
-        self.add_input("rho", val=1.0, units="slug/ft**3")
-        self.add_input("mu", val=1.0, units="lbf*s/ft**2")
-        self.add_input("v", val=1.0, units="ft/s")
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        d = VarDecl()
+        _spec = data
 
-        self.add_output("re", val=1.0, units="1/ft")
+        d.add_input("rho", val=1.0, units="slug/ft**3")
+        d.add_input("mu", val=1.0, units="lbf*s/ft**2")
+        d.add_input("v", val=1.0, units="ft/s")
 
-        self.declare_partials("re", ["rho", "mu", "v"])
+        d.add_output("re", val=1.0, units="1/ft")
 
-    def compute(self, inputs, outputs):
+        d.declare_partials("re", ["rho", "mu", "v"])
+        return d.into(_spec)
+
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         outputs["re"] = inputs["rho"] * inputs["v"] / inputs["mu"]
 
     def compute_partials(self, inputs, partials):

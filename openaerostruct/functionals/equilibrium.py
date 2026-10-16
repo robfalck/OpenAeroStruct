@@ -1,5 +1,12 @@
-import openmdao.api as om
+from typing import Any
+
+from pydantic import model_validator
+
+import om4.api as om
+
 from openaerostruct.utils.constants import grav_constant
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class Equilibrium(om.ExplicitComponent):
@@ -45,48 +52,56 @@ class Equilibrium(om.ExplicitComponent):
         weights, and fuel.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
+    surfaces: list[Surface]
 
-    def setup(self):
-        for surface in self.options["surfaces"]:
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data
+
+        for surface in f["surfaces"]:
             name = surface["name"]
-            self.add_input(name + "_structural_mass", val=1.0, units="kg")
-            self.declare_partials("L_equals_W", name + "_structural_mass")
-            self.declare_partials("total_weight", name + "_structural_mass")
+            d.add_input(name + "_structural_mass", val=1.0, units="kg")
+            d.declare_partials("L_equals_W", name + "_structural_mass")
+            d.declare_partials("total_weight", name + "_structural_mass")
 
-        self.add_input("fuelburn", val=123.0, units="kg")
-        self.add_input("W0", val=1000.0, units="kg")
-        self.add_input("load_factor", val=1.05)
+        d.add_input("fuelburn", val=123.0, units="kg")
+        d.add_input("W0", val=1000.0, units="kg")
+        d.add_input("load_factor", val=1.05)
 
-        self.add_input("CL", val=0.7)
+        d.add_input("CL", val=0.7)
 
-        self.add_input("S_ref_total", val=15.0, units="m**2")
-        self.add_input("v", val=100.0, units="m/s")
-        self.add_input("rho", val=1.2, units="kg/m**3")
+        d.add_input("S_ref_total", val=15.0, units="m**2")
+        d.add_input("v", val=100.0, units="m/s")
+        d.add_input("rho", val=1.2, units="kg/m**3")
 
-        self.add_output("L_equals_W", val=1.0)
-        self.add_output("total_weight", val=1.0, units="N")
+        d.add_output("L_equals_W", val=1.0)
+        d.add_output("total_weight", val=1.0, units="N")
 
-        self.declare_partials("L_equals_W", "CL")
-        self.declare_partials("L_equals_W", "S_ref_total")
-        self.declare_partials("L_equals_W", "W0")
-        self.declare_partials("L_equals_W", "fuelburn")
-        self.declare_partials("L_equals_W", "load_factor")
-        self.declare_partials("L_equals_W", "rho")
-        self.declare_partials("L_equals_W", "v")
-        self.declare_partials("total_weight", "W0")
-        self.declare_partials("total_weight", "fuelburn")
-        self.declare_partials("total_weight", "load_factor")
+        d.declare_partials("L_equals_W", "CL")
+        d.declare_partials("L_equals_W", "S_ref_total")
+        d.declare_partials("L_equals_W", "W0")
+        d.declare_partials("L_equals_W", "fuelburn")
+        d.declare_partials("L_equals_W", "load_factor")
+        d.declare_partials("L_equals_W", "rho")
+        d.declare_partials("L_equals_W", "v")
+        d.declare_partials("total_weight", "W0")
+        d.declare_partials("total_weight", "fuelburn")
+        d.declare_partials("total_weight", "load_factor")
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         g = grav_constant * inputs["load_factor"]
         W0 = inputs["W0"]
         rho = inputs["rho"]
         v = inputs["v"]
 
         structural_mass = 0.0
-        for surface in self.options["surfaces"]:
+        for surface in self.surfaces:
             name = surface["name"]
             structural_mass += inputs[name + "_structural_mass"]
 
@@ -104,7 +119,7 @@ class Equilibrium(om.ExplicitComponent):
         v = inputs["v"]
 
         structural_mass = 0.0
-        for surface in self.options["surfaces"]:
+        for surface in self.surfaces:
             name = surface["name"]
             structural_mass += inputs[name + "_structural_mass"]
 
@@ -128,7 +143,7 @@ class Equilibrium(om.ExplicitComponent):
         partials["L_equals_W", "CL"] = -0.5 * rho * v**2 * S_ref_tot / tot_weight
         partials["L_equals_W", "S_ref_total"] = -0.5 * rho * v**2 * inputs["CL"] / tot_weight
 
-        for surface in self.options["surfaces"]:
+        for surface in self.surfaces:
             name = surface["name"]
             partials["total_weight", name + "_structural_mass"] = 1.0 * g
             partials["L_equals_W", name + "_structural_mass"] = L / tot_weight**2 * g

@@ -1,7 +1,13 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
 from openaerostruct.utils.constants import grav_constant
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class CenterOfGravity(om.ExplicitComponent):
@@ -41,34 +47,42 @@ class CenterOfGravity(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
+    surfaces: list[Surface]
 
-    def setup(self):
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data
+
         arange = np.arange(3)
-        for surface in self.options["surfaces"]:
+        for surface in f["surfaces"]:
             name = surface["name"]
-            self.add_input(name + "_structural_mass", val=1.0, units="kg")
-            self.add_input(name + "_cg_location", val=np.ones(3), units="m")
+            d.add_input(name + "_structural_mass", val=1.0, units="kg")
+            d.add_input(name + "_cg_location", val=np.ones(3), units="m")
 
-            self.declare_partials("cg", name + "_cg_location", rows=arange, cols=arange)
-            self.declare_partials("cg", name + "_structural_mass")
+            d.declare_partials("cg", name + "_cg_location", rows=arange, cols=arange)
+            d.declare_partials("cg", name + "_structural_mass")
 
-        self.add_input("total_weight", val=1000.0, units="N")
-        self.add_input("fuelburn", val=1.5, units="kg")
-        self.add_input("W0", val=123.0, units="kg")
-        self.add_input("load_factor", val=1.05)
-        self.add_input("empty_cg", val=np.ones((3)), units="m")
+        d.add_input("total_weight", val=1000.0, units="N")
+        d.add_input("fuelburn", val=1.5, units="kg")
+        d.add_input("W0", val=123.0, units="kg")
+        d.add_input("load_factor", val=1.05)
+        d.add_input("empty_cg", val=np.ones((3)), units="m")
 
-        self.add_output("cg", val=np.ones(3), units="m")
+        d.add_output("cg", val=np.ones(3), units="m")
 
-        self.declare_partials("cg", "total_weight")
-        self.declare_partials("cg", "W0")
-        self.declare_partials("cg", "fuelburn")
-        self.declare_partials("cg", "load_factor")
-        self.declare_partials("cg", "empty_cg", rows=arange, cols=arange)
+        d.declare_partials("cg", "total_weight")
+        d.declare_partials("cg", "W0")
+        d.declare_partials("cg", "fuelburn")
+        d.declare_partials("cg", "load_factor")
+        d.declare_partials("cg", "empty_cg", rows=arange, cols=arange)
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         g = grav_constant * inputs["load_factor"]
         W0_cg = inputs["W0"] * inputs["empty_cg"]
 
@@ -76,7 +90,7 @@ class CenterOfGravity(om.ExplicitComponent):
 
         # Loop through the surfaces and compute the weighted cg location
         # of all structural spars
-        for surface in self.options["surfaces"]:
+        for surface in self.surfaces:
             name = surface["name"]
             spar_cg = spar_cg + inputs[name + "_cg_location"] * inputs[name + "_structural_mass"]
 
@@ -96,7 +110,7 @@ class CenterOfGravity(om.ExplicitComponent):
 
         # Loop through the surfaces and compute the weighted cg location
         # of all structural spars
-        for surface in self.options["surfaces"]:
+        for surface in self.surfaces:
             name = surface["name"]
             spar_cg = spar_cg + inputs[name + "_cg_location"] * inputs[name + "_structural_mass"]
 
@@ -107,7 +121,7 @@ class CenterOfGravity(om.ExplicitComponent):
 
         partials["cg", "W0"] = cg / (tw / g - fb)
 
-        for surface in self.options["surfaces"]:
+        for surface in self.surfaces:
             name = surface["name"]
             partials["cg", name + "_cg_location"] = -g * inputs[name + "_structural_mass"] / (fb * g - tw)
             partials["cg", name + "_structural_mass"] = -inputs[name + "_cg_location"] * g / (fb * g - tw)

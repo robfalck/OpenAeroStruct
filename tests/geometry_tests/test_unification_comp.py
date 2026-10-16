@@ -1,6 +1,7 @@
 import unittest
 
-import openmdao.api as om
+import numpy as np
+
 from openaerostruct.geometry.geometry_unification import GeomMultiUnification
 from openaerostruct.geometry.utils import build_section_dicts
 from openaerostruct.geometry.utils import stretch, sweep, dihedral
@@ -14,15 +15,8 @@ class Test(unittest.TestCase):
 
         comp = GeomMultiUnification(sections=sec_dicts, surface_name=surface["name"], shift_uni_mesh=False)
 
-        group = om.Group()
-
-        group.add_subsystem("comp", comp, promotes=["*"])
-
-        group.set_input_defaults("sec0_def_mesh", sec_dicts[0]["mesh"])
-        group.set_input_defaults("sec1_def_mesh", sec_dicts[1]["mesh"])
-        group.set_input_defaults("sec2_def_mesh", sec_dicts[2]["mesh"])
-
-        run_test(self, group, complex_flag=True, method="cs")
+        values = {f"comp.sec{i}_def_mesh": sec_dicts[i]["mesh"] for i in range(3)}
+        run_test(self, comp, method="cs", values=values)
 
     def test_shift(self):
         (surface, chord_bspline) = get_three_section_surface()
@@ -41,15 +35,23 @@ class Test(unittest.TestCase):
 
         comp = GeomMultiUnification(sections=sec_dicts, surface_name=surface["name"], shift_uni_mesh=True)
 
-        group = om.Group()
+        values = {f"comp.sec{i}_def_mesh": sec_dicts[i]["mesh"] for i in range(3)}
+        run_test(self, comp, method="cs", values=values)
 
-        group.add_subsystem("comp", comp, promotes=["*"])
+    def test_different_ny_with_t_over_c(self):
+        (surface, chord_bspline) = get_three_section_surface()
+        surface["ny"] = [5, 7, 9]
+        sec_dicts = build_section_dicts(surface)
 
-        group.set_input_defaults("sec0_def_mesh", sec_dicts[0]["mesh"])
-        group.set_input_defaults("sec1_def_mesh", sec_dicts[1]["mesh"])
-        group.set_input_defaults("sec2_def_mesh", sec_dicts[2]["mesh"])
+        comp = GeomMultiUnification(sections=sec_dicts, surface_name=surface["name"], shift_uni_mesh=True)
 
-        run_test(self, group, complex_flag=True, method="cs")
+        values = {f"comp.sec{i}_def_mesh": sec_dicts[i]["mesh"] for i in range(3)}
+        values.update(
+            {f"comp.sec{i}_t_over_c": np.linspace(0.1, 0.2, sec_dicts[i]["mesh"].shape[1] - 1) for i in range(3)}
+        )
+        prob = run_test(self, comp, method="cs", values=values)
+        expected = np.concatenate([values[f"comp.sec{i}_t_over_c"] for i in range(3)])
+        np.testing.assert_allclose(prob.get_val("comp.surface_uni_t_over_c"), expected)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,13 @@ from collections import namedtuple
 import numpy as np
 from scipy.interpolate import Akima1DInterpolator as Akima
 
-import openmdao.api as om
+from typing import Any
+
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl
 
 
 """United States standard atmosphere 1976 tables, data obtained from http://www.digitaldutch.com/atmoscalc/index.htm"""
@@ -726,28 +732,36 @@ viscosity_interp_deriv = viscosity_interp.derivative(1)
 
 
 class AtmosComp(om.ExplicitComponent):
-    def setup(self):
-        self.add_input("altitude", val=1.0, units="ft")
-        self.add_input("Mach_number", val=1.0)
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        d = VarDecl()
+        _spec = data
 
-        self.add_output("T", val=1.0, units="degR")
-        self.add_output("P", val=1.0, units="psi")
-        self.add_output("rho", val=1.0, units="slug/ft**3")
-        self.add_output("speed_of_sound", val=1.0, units="ft/s")
-        self.add_output("mu", val=1.0, units="lbf*s/ft**2")
-        self.add_output("v", val=1.0, units="ft/s")
+        d.add_input("altitude", val=1.0, units="ft")
+        d.add_input("Mach_number", val=1.0, units=None)
 
-        self.declare_partials(["T", "P", "rho", "speed_of_sound", "mu", "v"], "altitude")
-        self.declare_partials("v", "Mach_number")
+        d.add_output("T", val=1.0, units="degR")
+        d.add_output("P", val=1.0, units="psi")
+        d.add_output("rho", val=1.0, units="slug/ft**3")
+        d.add_output("speed_of_sound", val=1.0, units="ft/s")
+        d.add_output("mu", val=1.0, units="lbf*s/ft**2")
+        d.add_output("v", val=1.0, units="ft/s")
 
-    def compute(self, inputs, outputs):
+        d.declare_partials(["T", "P", "rho", "speed_of_sound", "mu", "v"], "altitude")
+        d.declare_partials("v", "Mach_number")
+        return d.into(_spec)
+
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         outputs["T"] = T_interp(inputs["altitude"])
         outputs["P"] = P_interp(inputs["altitude"])
         outputs["rho"] = rho_interp(inputs["altitude"])
         outputs["speed_of_sound"] = a_interp(inputs["altitude"])
         outputs["mu"] = viscosity_interp(inputs["altitude"])
 
-        outputs["v"] = outputs["speed_of_sound"] * inputs["Mach_number"]
+        outputs["v"] = a_interp(inputs["altitude"]) * inputs["Mach_number"]
 
     def compute_partials(self, inputs, partials):
         partials["T", "altitude"] = T_interp_deriv(inputs["altitude"])

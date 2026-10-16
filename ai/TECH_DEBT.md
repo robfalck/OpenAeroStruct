@@ -10,12 +10,12 @@ step; **Low** = tidiness.
 
 | ID | Item | Severity | Notes |
 |---|---|---|---|
-| TD-001 | Multi-section surfaces (`MultiSecGeometry`, `MultiSecAerostructGeometry`, `geometry_unification`, `geometry_multi_join`, `section_mesh_generator` beyond `gen-mesh`) | Medium | `Surface` raises `NotImplementedError` on `is_multi_section`. Tests `test_multi_*` are not yet ported. OM3 code is on `main` |
+| TD-001 | Multi-section surfaces (`MultiSecGeometry`, `MultiSecAerostructGeometry`, `section_mesh_generator` beyond `gen-mesh`; the `geometry_unification` and `geometry_multi_join` components are ported and unit-tested with section dicts) | Medium | `Surface` raises `NotImplementedError` on `is_multi_section`. Tests `test_multi_*` are not yet ported. OM3 code is on `main` |
 | TD-002 | Compressible VLM (`CompressibleVLMStates`, `pg_scale.py`, `pg_wind_rotation.py`) | Medium | `AeroPoint(compressible=True)` raises. `pg_*` also need analytic partials for the Mach/alpha/beta columns OM3 complex-stepped (single differentiator per component, OM4_NEEDS N-002) |
 | TD-003 | FFD geometry (`ffd_component.py`, `DVGeo` option) | Low | `DVGeo` is a live pygeo object and can't be a serializable field. Needs a design for referencing external geometry engines |
 | TD-004 | `mphys/` | Low | mphys is built on OM3 |
 | TD-005 | `plot_wing` / `plot_wingbox` | Low | Need optimizer-iteration recording, which om4 lacks |
-| TD-006 | Structures, transfer, aerostructural groups, remaining functionals | — | Next phases of `ai/OM4_MIGRATION_PLAN.md` |
+| TD-006 | Structures, transfer, aerostructural groups | — | Next phases of `ai/OM4_MIGRATION_PLAN.md` |
 
 ## Deliberate deviations from OM3
 

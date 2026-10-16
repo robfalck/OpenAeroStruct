@@ -1,9 +1,15 @@
 """Manipulate geometry mesh based on high-level design parameters."""
 
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
 from openaerostruct.structures.utils import radii
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class RadiusComp(om.ExplicitComponent):
@@ -25,29 +31,33 @@ class RadiusComp(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        nx, ny = f.surface["mesh"].shape[:2]
+        d = VarDecl()
 
-        nx, ny = self.nx, self.ny = surface["mesh"].shape[:2]
-
-        self.add_input("mesh", val=np.zeros((nx, ny, 3)), units="m")
-        self.add_input("t_over_c", val=np.ones((ny - 1)))
-        self.add_output("radius", val=np.ones((ny - 1)), units="m")
+        d.add_input("mesh", val=np.zeros((nx, ny, 3)), units="m")
+        d.add_input("t_over_c", val=np.ones((ny - 1)))
+        d.add_output("radius", val=np.ones((ny - 1)), units="m")
 
         arange = np.arange(ny - 1)
-        self.declare_partials("radius", "t_over_c", rows=arange, cols=arange)
+        d.declare_partials("radius", "t_over_c", rows=arange, cols=arange)
 
         row = np.tile(np.zeros(6), ny - 1) + np.repeat(arange, 6)
         rows = np.concatenate([row, row])
         col = np.tile(np.arange(6), ny - 1) + np.repeat(3 * arange, 6)
         cols = np.concatenate([col, col + (nx - 1) * 3 * ny])
 
-        self.declare_partials("radius", "mesh", rows=rows, cols=cols)
+        d.declare_partials("radius", "mesh", rows=rows, cols=cols)
+        return d.into(data)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         outputs["radius"] = radii(inputs["mesh"], inputs["t_over_c"])
 
     def compute_partials(self, inputs, partials):
@@ -55,6 +65,7 @@ class RadiusComp(om.ExplicitComponent):
         Obtain the radii of the FEM element based on local chord.
         """
         mesh = inputs["mesh"]
+        ny = mesh.shape[1]
         vectors = mesh[-1, :, :] - mesh[0, :, :]
         chords = np.sqrt(np.sum(vectors**2, axis=1))
         t_c = inputs["t_over_c"]
@@ -68,11 +79,9 @@ class RadiusComp(om.ExplicitComponent):
         length = np.sqrt(np.sum(dr**2, axis=1))
         dr = dr / length[:, np.newaxis]
 
-        drad = np.empty((self.ny - 1, 6))
+        drad = np.empty((ny - 1, 6))
         drad[:, :3] = np.einsum("i, ij -> ij", dr_dchords, dr[:-1, :])
         drad[:, 3:] = np.einsum("i, ij -> ij", dr_dchords, dr[1:, :])
         drad = drad.flatten()
 
-        nn = 6 * (self.ny - 1)
-        partials["radius", "mesh"][:nn] = drad
-        partials["radius", "mesh"][nn:] = -drad
+        partials["radius", "mesh"] = np.concatenate([drad, -drad])

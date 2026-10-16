@@ -15,3 +15,6 @@ fwd/rev total derivatives for groups. Run from the repo root in the pixi env, fo
 | `xc_states.py` | `VLMStates` group (values, fwd/rev totals) |
 | `xc_func.py` | Viscous/wave drag, lift, coefficients, totals, moment |
 | `xc_aeropoint.py` | Full `Geometry` + `AeroPoint` model in four configurations (values, fwd/rev totals) |
+| `xc_common_func.py` | `AtmosComp`, `ReynoldsComp`, `BreguetRange`, `CenterOfGravity`, `Equilibrium` |
+| `xc_totalperf.py` | `TotalPerformance` group (values, fwd/rev totals; all option combinations) |
+| `xc_geom_misc.py` | `RadiusComp`, `MonotonicConstraint`, `GeomMultiUnification`, `GeomMultiJoin` (OM3 `t_over_c` sizing bug excluded) |

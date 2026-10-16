@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class BreguetRange(om.ExplicitComponent):
@@ -41,28 +47,35 @@ class BreguetRange(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
+    surfaces: list[Surface]
 
-    def setup(self):
-        for surface in self.options["surfaces"]:
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data
+
+        for surface in f["surfaces"]:
             name = surface["name"]
-            self.add_input(name + "_structural_mass", val=1.0, units="kg")
+            d.add_input(name + "_structural_mass", val=1.0, units="kg")
 
-        self.add_input("CT", val=0.25, units="1/s")
-        self.add_input("CL", val=0.7)
-        self.add_input("CD", val=0.02)
-        self.add_input("speed_of_sound", val=100.0, units="m/s")
-        self.add_input("R", val=3000.0, units="m")
-        self.add_input("Mach_number", val=1.2)
-        self.add_input("W0", val=200.0, units="kg")
+        d.add_input("CT", val=0.25, units="1/s")
+        d.add_input("CL", val=0.7)
+        d.add_input("CD", val=0.02)
+        d.add_input("speed_of_sound", val=100.0, units="m/s")
+        d.add_input("R", val=3000.0, units="m")
+        d.add_input("Mach_number", val=1.2)
+        d.add_input("W0", val=200.0, units="kg")
 
-        self.add_output("fuelburn", val=1.0, units="kg")
+        d.add_output("fuelburn", val=1.0, units="kg")
 
-        self.declare_partials("*", "*")
-        self.set_check_partial_options(wrt="*", method="cs", step=1e-30)
+        d.declare_partials("*", "*")
+        return d.into(_spec)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         CT = inputs["CT"]
         a = inputs["speed_of_sound"]
         R = inputs["R"]
@@ -72,7 +85,7 @@ class BreguetRange(om.ExplicitComponent):
         # Loop through the surfaces and add up the structural weights
         # to get the total structural weight.
         Ws = 0.0
-        for surface in self.options["surfaces"]:
+        for surface in self.surfaces:
             name = surface["name"]
             Ws += inputs[name + "_structural_mass"]
 
@@ -89,7 +102,7 @@ class BreguetRange(om.ExplicitComponent):
         W0 = inputs["W0"]
 
         Ws = 0.0
-        for surface in self.options["surfaces"]:
+        for surface in self.surfaces:
             name = surface["name"]
             Ws += inputs[name + "_structural_mass"]
 
@@ -113,7 +126,7 @@ class BreguetRange(om.ExplicitComponent):
         partials["fuelburn", "Mach_number"] = dfb_dM
         partials["fuelburn", "W0"] = dfb_dW
 
-        for surface in self.options["surfaces"]:
+        for surface in self.surfaces:
             name = surface["name"]
             inp_name = name + "_structural_mass"
             partials["fuelburn", inp_name] = dfb_dW

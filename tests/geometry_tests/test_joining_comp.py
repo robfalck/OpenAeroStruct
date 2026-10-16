@@ -13,7 +13,8 @@ class Test(unittest.TestCase):
 
         comp = GeomMultiJoin(sections=sec_dicts, dim_constr=[np.ones(3), np.ones(3), np.ones(3)])
 
-        run_test(self, comp, complex_flag=True, method="cs")
+        values = {f"comp.sec{i}_join_mesh": sec_dicts[i]["mesh"] for i in range(3)}
+        run_test(self, comp, method="cs", values=values)
 
 
 if __name__ == "__main__":
