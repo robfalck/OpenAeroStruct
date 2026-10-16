@@ -1,0 +1,139 @@
+"""Time OM3 (from main) against the om4 port on the test_aerostruct_analysis model.
+
+Run from the repo root: pixi run python benchmark/bench_aerostruct.py
+"""
+
+import contextlib
+import io
+import sys
+import time
+
+import numpy as np
+import openmdao.api as om3
+
+import om4.api as om
+
+sys.path.insert(0, "ai/tools")
+from om3_crosscheck import om3_oas  # noqa: E402
+
+om3_oas()
+from oas_om3.integration.aerostruct_groups import AerostructGeometry as G3, AerostructPoint as P3  # noqa: E402
+from openaerostruct.integration.aerostruct_groups import AerostructGeometry as G4, AerostructPoint as P4  # noqa: E402
+from openaerostruct.meshing.mesh_generator import generate_mesh  # noqa: E402
+from openaerostruct.utils.constants import grav_constant  # noqa: E402
+
+FLOW = {
+    "v": (248.136, "m/s"),
+    "alpha": (5.0, "deg"),
+    "Mach_number": (0.84, None),
+    "re": (1e6, "1/m"),
+    "rho": (0.38, "kg/m**3"),
+    "CT": (grav_constant * 17e-6, "1/s"),
+    "R": (11.165e6, "m"),
+    "W0": (0.4 * 3e5, "kg"),
+    "speed_of_sound": (295.4, "m/s"),
+    "load_factor": (1.0, None),
+    "empty_cg": (np.zeros(3), "m"),
+}
+
+
+def surf(nx, ny):
+    mesh, tw = generate_mesh({"num_y": ny, "num_x": nx, "wing_type": "CRM", "symmetry": True, "num_twist_cp": 5})
+    return {
+        "name": "wing",
+        "symmetry": True,
+        "S_ref_type": "wetted",
+        "fem_model_type": "tube",
+        "thickness_cp": np.array([0.1, 0.2, 0.3]),
+        "twist_cp": tw,
+        "mesh": mesh,
+        "CL0": 0.0,
+        "CD0": 0.015,
+        "k_lam": 0.05,
+        "t_over_c_cp": np.array([0.15]),
+        "c_max_t": 0.303,
+        "with_viscous": True,
+        "with_wave": False,
+        "E": 70e9,
+        "G": 30e9,
+        "yield": 500e6,
+        "safety_factor": 2.5,
+        "mrho": 3e3,
+        "fem_origin": 0.35,
+        "wing_weight_ratio": 2.0,
+        "struct_weight_relief": False,
+        "distributed_fuel_weight": False,
+        "exact_failure_constraint": False,
+    }
+
+
+CONN = [
+    ("local_stiff_transformed", "coupled.wing.local_stiff_transformed"),
+    ("nodes", "coupled.wing.nodes"),
+    ("mesh", "coupled.wing.mesh"),
+    ("radius", "wing_perf.radius"),
+    ("thickness", "wing_perf.thickness"),
+    ("nodes", "wing_perf.nodes"),
+    ("cg_location", "total_perf.wing_cg_location"),
+    ("structural_mass", "total_perf.wing_structural_mass"),
+    ("t_over_c", "wing_perf.t_over_c"),
+]
+
+
+def build3(S):
+    p = om3.Problem(reports=False)
+    iv = om3.IndepVarComp()
+    for k, (v, u) in FLOW.items():
+        iv.add_output(k, val=v, units=u)
+    p.model.add_subsystem("prob_vars", iv, promotes=["*"])
+    p.model.add_subsystem("wing", G3(surface=dict(S)))
+    p.model.add_subsystem("AS_point_0", P3(surfaces=[dict(S)]))
+    for k in FLOW:
+        p.model.connect(k, "AS_point_0." + k)
+    for a, b in CONN:
+        p.model.connect("wing." + a, "AS_point_0." + b)
+    p.setup()
+    return p
+
+
+def build4(S):
+    conns = [om.Connection(src="wing." + a, tgt="AS_point_0." + b) for a, b in CONN]
+    pt = P4(surfaces=[dict(S)], promotes_inputs=list(FLOW))
+    p = om.Problem(model=om.Group(subsystems={"wing": G4(surface=dict(S)), "AS_point_0": pt}, connections=conns))
+    for k, (v, u) in FLOW.items():
+        p.set_val(k, v, units=u)
+    return p
+
+
+def t(f):
+    t0 = time.perf_counter()
+    r = f()
+    return time.perf_counter() - t0, r
+
+
+def bench(build, S):
+    ts, p = t(lambda: build(S))
+    t1, _ = t(p.run_model)
+
+    def rerun(a):
+        p.set_val("alpha", a, units="deg")
+        return t(p.run_model)[0]
+
+    t2 = min(rerun(4.0), rerun(6.0))
+    fb = float(np.ravel(p.get_val("AS_point_0.fuelburn"))[0])
+    tt, _ = t(lambda: p.compute_totals(of=["AS_point_0.fuelburn"], wrt=["wing.thickness_cp"]))
+    return ts, t1, t2, tt, fb
+
+
+if __name__ == "__main__":
+    for nx, ny in ((2, 5), (3, 21), (4, 41)):
+        S = surf(nx, ny)
+        res = {}
+        for label, build in (("om3", build3), ("om4", build4)):
+            with contextlib.redirect_stdout(io.StringIO()):
+                res[label] = bench(build, S)
+        print(f"nx={nx} ny={ny}")
+        for k, v in res.items():
+            print(
+                f"  {k}: build/setup {v[0]:.2f}s  first run {v[1]:.2f}s  rerun {v[2]:.2f}s  totals {v[3]:.2f}s  fuelburn {v[4]:.4f}"
+            )
