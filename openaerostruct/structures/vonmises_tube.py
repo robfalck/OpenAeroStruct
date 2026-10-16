@@ -1,8 +1,13 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
 
 from openaerostruct.structures.utils import norm, unit, norm_d, unit_d, cross_d
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class VonMisesTube(om.ExplicitComponent):
@@ -24,58 +29,56 @@ class VonMisesTube(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
+    check_partials_options: om.CheckPartialsOptions | None = om.CheckPartialsOptions(differentiator="cs")
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        ny = f.surface["mesh"].shape[1]
+        d = VarDecl()
 
-        ny = self.ny = surface["mesh"].shape[1]
+        d.add_input("nodes", val=np.zeros((ny, 3)), units="m")
+        d.add_input("radius", val=np.zeros((ny - 1)), units="m")
+        d.add_input("disp", val=np.zeros((ny, 6)), units="m")
 
-        self.add_input("nodes", val=np.zeros((ny, 3)), units="m")
-        self.add_input("radius", val=np.zeros((ny - 1)), units="m")
-        self.add_input("disp", val=np.zeros((ny, 6)), units="m")
-
-        self.add_output("vonmises", val=np.zeros((ny - 1, 2)), units="N/m**2")
-
-        self.E = surface["E"]
-        self.G = surface["G"]
+        d.add_output("vonmises", val=np.zeros((ny - 1, 2)), units="N/m**2")
 
         row = np.concatenate([np.zeros(6), np.ones(6)])
         rows = np.tile(row, ny - 1) + np.repeat(2 * np.arange(ny - 1), 12)
         col = np.tile(np.arange(6), 2)
         cols = np.tile(col, ny - 1) + np.repeat(3 * np.arange(ny - 1), 12)
 
-        self.declare_partials("*", "nodes", rows=rows, cols=cols)
+        d.declare_partials("*", "nodes", rows=rows, cols=cols)
 
         rows = np.arange(2 * (ny - 1))
         cols = np.repeat(np.arange(ny - 1), 2)
 
-        self.declare_partials("*", "radius", rows=rows, cols=cols)
+        d.declare_partials("*", "radius", rows=rows, cols=cols)
 
         row = np.concatenate([np.zeros(12), np.ones(12)])
         rows = np.tile(row, ny - 1) + np.repeat(2 * np.arange(ny - 1), 24)
         col = np.tile(np.arange(12), 2)
         cols = np.tile(col, ny - 1) + np.repeat(6 * np.arange(ny - 1), 24)
 
-        self.declare_partials("*", "disp", rows=rows, cols=cols)
+        d.declare_partials("*", "disp", rows=rows, cols=cols)
+        return d.into(data)
 
-    def compute(self, inputs, outputs):
-        dtype = float
-        if self.under_complex_step:
-            dtype = complex
-
-        self.T = np.zeros((3, 3), dtype=dtype)
-        self.x_gl = np.array([1, 0, 0], dtype=dtype)
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         radius = inputs["radius"]
         disp = inputs["disp"]
         nodes = inputs["nodes"]
-        T = self.T
-        E = self.E
-        G = self.G
-        x_gl = self.x_gl
+        dtype = np.result_type(radius, disp, nodes)
+        T = np.zeros((3, 3), dtype=dtype)
+        x_gl = np.array([1, 0, 0], dtype=dtype)
+        E = self.surface["E"]
+        G = self.surface["G"]
 
-        num_elems = self.ny - 1
+        num_elems = nodes.shape[0] - 1
+        vonmises = np.zeros((num_elems, 2), dtype=dtype)
         for ielem in range(num_elems):
             P0 = nodes[ielem, :]
             P1 = nodes[ielem + 1, :]
@@ -99,19 +102,24 @@ class VonMisesTube(om.ExplicitComponent):
             sxx1 = E * (u0x - u1x) / L + E * radius[ielem] / L * tmp
             sxt = G * radius[ielem] * (r1x - r0x) / L
 
-            outputs["vonmises"][ielem, 0] = np.sqrt(sxx0**2 + 3 * sxt**2)
-            outputs["vonmises"][ielem, 1] = np.sqrt(sxx1**2 + 3 * sxt**2)
+            vonmises[ielem, 0] = np.sqrt(sxx0**2 + 3 * sxt**2)
+            vonmises[ielem, 1] = np.sqrt(sxx1**2 + 3 * sxt**2)
+
+        outputs["vonmises"] = vonmises
 
     def compute_partials(self, inputs, partials):
         radius = inputs["radius"]
         disp = inputs["disp"]
         nodes = inputs["nodes"]
-        T = self.T
-        E = self.E
-        G = self.G
-        x_gl = self.x_gl
+        T = np.zeros((3, 3))
+        x_gl = np.array([1.0, 0.0, 0.0])
+        E = self.surface["E"]
+        G = self.surface["G"]
 
-        num_elems = self.ny - 1
+        num_elems = nodes.shape[0] - 1
+        d_radius = np.zeros(2 * num_elems)
+        d_disp = np.zeros(24 * num_elems)
+        d_nodes = np.zeros(12 * num_elems)
         for ielem in range(num_elems):
             # Compute the coordinate delta between the two element end points
             P0 = nodes[ielem, :]
@@ -248,20 +256,24 @@ class VonMisesTube(om.ExplicitComponent):
             dVm1dsxt = 3 * sxt * fact
 
             ii = 2 * ielem
-            partials["vonmises", "radius"][ii] = dVm0dsxx0 * dsxxdrad + dVm0dsxt * dsxtdrad
-            partials["vonmises", "radius"][ii + 1] = dVm1dsxx1 * dsxxdrad + dVm1dsxt * dsxtdrad
+            d_radius[ii] = dVm0dsxx0 * dsxxdrad + dVm0dsxt * dsxtdrad
+            d_radius[ii + 1] = dVm1dsxx1 * dsxxdrad + dVm1dsxt * dsxtdrad
 
             ii = 24 * ielem
-            partials["vonmises", "disp"][ii : ii + 12] = dVm0dsxx0 * dsxx0dDisp + dVm0dsxt * dsxtdDisp
-            partials["vonmises", "disp"][ii + 12 : ii + 24] = dVm1dsxx1 * dsxx1dDisp + dVm1dsxt * dsxtdDisp
+            d_disp[ii : ii + 12] = dVm0dsxx0 * dsxx0dDisp + dVm0dsxt * dsxtdDisp
+            d_disp[ii + 12 : ii + 24] = dVm1dsxx1 * dsxx1dDisp + dVm1dsxt * dsxtdDisp
 
             # Compute terms for the nodes
             ii = 12 * ielem
 
             dVm0_dnode = dVm0dsxx0 * dsxx0dP + dVm0dsxt * dsxtdP
-            partials["vonmises", "nodes"][ii : ii + 3] = -dVm0_dnode
-            partials["vonmises", "nodes"][ii + 3 : ii + 6] = dVm0_dnode
+            d_nodes[ii : ii + 3] = -dVm0_dnode
+            d_nodes[ii + 3 : ii + 6] = dVm0_dnode
 
             dVM1_dnode = dVm1dsxx1 * dsxx1dP + dVm1dsxt * dsxtdP
-            partials["vonmises", "nodes"][ii + 6 : ii + 9] = -dVM1_dnode
-            partials["vonmises", "nodes"][ii + 9 : ii + 12] = dVM1_dnode
+            d_nodes[ii + 6 : ii + 9] = -dVM1_dnode
+            d_nodes[ii + 9 : ii + 12] = dVM1_dnode
+
+        partials["vonmises", "radius"] = d_radius
+        partials["vonmises", "disp"] = d_disp
+        partials["vonmises", "nodes"] = d_nodes

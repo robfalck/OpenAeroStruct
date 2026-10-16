@@ -1,7 +1,12 @@
+from typing import Any
+
 import numpy as np
+from pydantic import model_validator
 
-import openmdao.api as om
+import om4.api as om
 
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 from openaerostruct.utils.vector_algebra import get_array_indices
 
 
@@ -26,6 +31,8 @@ class DisplacementTransfer(om.ExplicitComponent):
         on the both the angle (which comes from `disp`) and from the distance
         of the aerodynamic mesh nodes to the structural mesh nodes (basically
         a moment arm).
+    nodes[ny, 3] : numpy array
+        Coordinates of the FEM nodes.
 
     Returns
     -------
@@ -34,82 +41,80 @@ class DisplacementTransfer(om.ExplicitComponent):
         the FEM results.
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        nx, ny = f.surface["mesh"].shape[:2]
+        d = VarDecl()
 
-        mesh = surface["mesh"]
-        self.nx = mesh.shape[0]
-        self.ny = mesh.shape[1]
-
-        self.add_input("mesh", val=np.ones((self.nx, self.ny, 3)), units="m")
-        self.add_input("disp", val=np.ones((self.ny, 6)), units="m")
-        self.add_input("transformation_matrix", val=np.ones((self.ny, 3, 3)))
-        self.add_input("nodes", val=np.ones((self.ny, 3)), units="m")
+        d.add_input("mesh", val=np.ones((nx, ny, 3)), units="m")
+        d.add_input("disp", val=np.ones((ny, 6)), units="m")
+        d.add_input("transformation_matrix", val=np.ones((ny, 3, 3)))
+        d.add_input("nodes", val=np.ones((ny, 3)), units="m")
         rng = np.random.default_rng(314)
-        self.add_output("def_mesh", val=rng.random((self.nx, self.ny, 3)), units="m")
+        d.add_output("def_mesh", val=rng.random((nx, ny, 3)), units="m")
 
         # Create index arrays for each relevant input and output.
         # This allows us to set up the rows and cols for the sparse Jacobians.
-        disp_indices = get_array_indices(self.ny, 6)
-        nodes_indices = get_array_indices(self.ny, 3)
-        mesh_indices = get_array_indices(self.nx, self.ny, 3)
-        transform_indices = get_array_indices(self.ny, 3, 3)
-        mesh_disp_indices = get_array_indices(self.nx, self.ny, 3)
+        disp_indices = get_array_indices(ny, 6)
+        nodes_indices = get_array_indices(ny, 3)
+        mesh_indices = get_array_indices(nx, ny, 3)
+        transform_indices = get_array_indices(ny, 3, 3)
+        mesh_disp_indices = get_array_indices(nx, ny, 3)
 
         # Set up the rows and cols for `def_mesh` wrt `disp`
         rows = mesh_disp_indices.flatten()
-        cols = np.einsum("i,jk->ijk", np.ones(self.nx), disp_indices[:, :3]).flatten()
-        self.declare_partials("def_mesh", "disp", val=1.0, rows=rows, cols=cols)
+        cols = np.einsum("i,jk->ijk", np.ones(nx), disp_indices[:, :3]).flatten()
+        d.declare_partials("def_mesh", "disp", val=1.0, rows=rows, cols=cols)
 
         # Set up the rows and cols for `def_mesh` wrt `nodes`
         rows = np.einsum("ijk,l->ijkl", mesh_disp_indices, np.ones(3, int)).flatten()
-        cols = np.einsum("ik,jl->ijkl", np.ones((self.nx, 3), int), nodes_indices).flatten()
-        self.declare_partials("def_mesh", "nodes", rows=rows, cols=cols)
+        cols = np.einsum("ik,jl->ijkl", np.ones((nx, 3), int), nodes_indices).flatten()
+        d.declare_partials("def_mesh", "nodes", rows=rows, cols=cols)
 
         # Set up the rows and cols for `def_mesh` wrt `mesh`
         rows = np.einsum("ijk,l->ijkl", mesh_disp_indices, np.ones(3, int)).flatten()
         cols = np.einsum("ijl,k->ijkl", mesh_indices, np.ones(3, int)).flatten()
-        self.declare_partials("def_mesh", "mesh", rows=rows, cols=cols)
+        d.declare_partials("def_mesh", "mesh", rows=rows, cols=cols)
 
         # Set up the rows and cols for `def_mesh` wrt `transformation_matrix`
         rows = np.einsum("ijl,k->ijkl", mesh_disp_indices, np.ones(3, int)).flatten()
-        cols = np.einsum("jlk,i->ijkl", transform_indices, np.ones(self.nx, int)).flatten()
-        self.declare_partials("def_mesh", "transformation_matrix", rows=rows, cols=cols)
+        cols = np.einsum("jlk,i->ijkl", transform_indices, np.ones(nx, int)).flatten()
+        d.declare_partials("def_mesh", "transformation_matrix", rows=rows, cols=cols)
+        return d.into(data)
 
-    def compute(self, inputs, outputs):
-        # Get the location of the spar
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         nodes = inputs["nodes"]
+        mesh = inputs["mesh"]
+        nx = mesh.shape[0]
 
-        # First set the deformed mesh with the undeformed mesh values
-        outputs["def_mesh"] = inputs["mesh"].copy()
+        # Add the translational displacements, which are the x, y, z displacements applied to
+        # all nodal mesh points.
+        def_mesh = mesh + np.einsum("i,jk->ijk", np.ones(nx), inputs["disp"][:, :3])
 
-        # Add the translational displacements to the deformed mesh.
-        # These are simply the x,y,z displacements getting added to all nodal
-        # mesh points.
-        outputs["def_mesh"] += np.einsum("i,jk->ijk", np.ones(self.nx), inputs["disp"][:, :3])
+        # Apply the transformation matrix to the moment arms from the structural mesh points to
+        # the aerodynamic mesh points, to transfer the FEM rotations to the aerodynamic mesh.
+        moment_arms = mesh - nodes
+        def_mesh = def_mesh + np.einsum("lij,klj->kli", inputs["transformation_matrix"], moment_arms)
 
-        # Compute the moment arms from the aerodynamic mesh points to the
-        # structural mesh points.
-        moment_arms = inputs["mesh"] - nodes
-
-        # Apply the transformation matrix to the moment arms to get the
-        # rotational displacements from the FEM results transformed to the
-        # aerodynamic mesh. Then add these to the deformed mesh.
-        outputs["def_mesh"] += np.einsum("lij,klj->kli", inputs["transformation_matrix"], moment_arms)
+        outputs["def_mesh"] = def_mesh
 
     def compute_partials(self, inputs, partials):
-        partials["def_mesh", "nodes"] = -np.einsum(
-            "i,jlk->ijlk", np.ones(self.nx), inputs["transformation_matrix"]
-        ).flatten()
+        mesh = inputs["mesh"]
+        nx, ny = mesh.shape[:2]
+        transform = inputs["transformation_matrix"]
 
-        partials["def_mesh", "mesh"] = np.einsum(
-            "i,jlk->ijlk", np.ones(self.nx), inputs["transformation_matrix"]
-        ).flatten()
-        partials["def_mesh", "mesh"] += np.tile(np.eye(3), self.nx * self.ny).flatten(order="F")
+        partials["def_mesh", "nodes"] = -np.einsum("i,jlk->ijlk", np.ones(nx), transform).flatten()
+
+        dmesh = np.einsum("i,jlk->ijlk", np.ones(nx), transform).flatten()
+        dmesh += np.tile(np.eye(3), nx * ny).flatten(order="F")
+        partials["def_mesh", "mesh"] = dmesh
 
         partials["def_mesh", "transformation_matrix"] = np.einsum(
-            "ijk,l->ijkl", inputs["mesh"] - np.einsum("i,jk->ijk", np.ones(self.nx), inputs["nodes"]), np.ones(3)
+            "ijk,l->ijkl", mesh - np.einsum("i,jk->ijk", np.ones(nx), inputs["nodes"]), np.ones(3)
         ).flatten()

@@ -1,11 +1,10 @@
-from openmdao.utils.assert_utils import assert_near_equal
+import om4.api as om
+from om4.utils.assert_utils import assert_near_equal
 import unittest
 import numpy as np
 
 from openaerostruct.meshing.mesh_generator import generate_mesh
 from openaerostruct.structures.struct_groups import SpatialBeamAlone
-
-import openmdao.api as om
 
 
 class Test(unittest.TestCase):
@@ -39,27 +38,22 @@ class Test(unittest.TestCase):
         }
 
         # Create the problem and assign the model group
-        prob = om.Problem()
+        subsystems = {}
+        connections = []
 
         ny = surf_dict["mesh"].shape[1]
 
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("loads", val=np.ones((ny, 6)) * 2e5, units="N")
-        indep_var_comp.add_output("load_factor", val=1.0)
-
         struct_group = SpatialBeamAlone(surface=surf_dict)
 
-        # Add indep_vars to the structural group
-        struct_group.add_subsystem("indep_vars", indep_var_comp, promotes=["*"])
-
-        prob.model.add_subsystem(surf_dict["name"], struct_group)
+        subsystems[surf_dict["name"]] = struct_group
 
         # Set up the problem
-        prob.setup()
+        prob = om.Problem(model=om.Group(subsystems=subsystems, connections=connections))
+        prob.set_val(surf_dict["name"] + ".loads", np.ones((ny, 6)) * 2e5, units="N")
 
         prob.run_model()
 
-        assert_near_equal(prob["wing.structural_mass"][0], 117819.798089, 1e-4)
+        assert_near_equal(prob.get_val("wing.structural_mass")[0], 117819.798089, 1e-4)
 
 
 if __name__ == "__main__":

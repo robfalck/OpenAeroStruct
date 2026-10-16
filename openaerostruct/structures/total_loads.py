@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class TotalLoads(om.ExplicitComponent):
@@ -27,47 +33,54 @@ class TotalLoads(om.ExplicitComponent):
         Flattened array containing the total loads applied on the FEM.
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
-        self.ny = surface["mesh"].shape[1]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        surface = f.surface
+        ny = surface["mesh"].shape[1]
+        d = VarDecl()
 
-        self.add_input("loads", val=np.ones((self.ny, 6)), units="N")
+        d.add_input("loads", val=np.ones((ny, 6)), units="N")
         if surface["struct_weight_relief"]:
-            self.add_input("struct_weight_loads", val=np.zeros((self.ny, 6)), units="N")
+            d.add_input("struct_weight_loads", val=np.zeros((ny, 6)), units="N")
         if surface["distributed_fuel_weight"]:
-            self.add_input("fuel_weight_loads", val=np.zeros((self.ny, 6)), units="N")
+            d.add_input("fuel_weight_loads", val=np.zeros((ny, 6)), units="N")
         if "n_point_masses" in surface.keys():
-            self.add_input("loads_from_point_masses", val=np.zeros((self.ny, 6)), units="N")
-            self.add_input("loads_from_thrusts", val=np.zeros((self.ny, 6)), units="N")
+            d.add_input("loads_from_point_masses", val=np.zeros((ny, 6)), units="N")
+            d.add_input("loads_from_thrusts", val=np.zeros((ny, 6)), units="N")
 
-        self.add_output("total_loads", val=np.ones((self.ny, 6)), units="N")
+        d.add_output("total_loads", val=np.ones((ny, 6)), units="N")
 
-        arange = np.arange(self.ny * 6)
+        arange = np.arange(ny * 6)
 
-        self.declare_partials("total_loads", "loads", rows=arange, cols=arange, val=1.0)
+        d.declare_partials("total_loads", "loads", rows=arange, cols=arange, val=1.0)
+
+        if surface["struct_weight_relief"]:
+            d.declare_partials("total_loads", "struct_weight_loads", rows=arange, cols=arange, val=1.0)
+
+        if surface["distributed_fuel_weight"]:
+            d.declare_partials("total_loads", "fuel_weight_loads", rows=arange, cols=arange, val=1.0)
+
+        if "n_point_masses" in surface.keys():
+            d.declare_partials("total_loads", "loads_from_point_masses", rows=arange, cols=arange, val=1.0)
+            d.declare_partials("total_loads", "loads_from_thrusts", rows=arange, cols=arange, val=1.0)
+        return d.into(data)
+
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        total = np.array(inputs["loads"])
 
         if self.surface["struct_weight_relief"]:
-            self.declare_partials("total_loads", "struct_weight_loads", rows=arange, cols=arange, val=1.0)
+            total += inputs["struct_weight_loads"]
 
         if self.surface["distributed_fuel_weight"]:
-            self.declare_partials("total_loads", "fuel_weight_loads", rows=arange, cols=arange, val=1.0)
-
-        if "n_point_masses" in surface.keys():
-            self.declare_partials("total_loads", "loads_from_point_masses", rows=arange, cols=arange, val=1.0)
-            self.declare_partials("total_loads", "loads_from_thrusts", rows=arange, cols=arange, val=1.0)
-
-    def compute(self, inputs, outputs):
-        outputs["total_loads"] = inputs["loads"]
-
-        if self.surface["struct_weight_relief"]:
-            outputs["total_loads"] += inputs["struct_weight_loads"]
-
-        if self.surface["distributed_fuel_weight"]:
-            outputs["total_loads"] += inputs["fuel_weight_loads"]
+            total += inputs["fuel_weight_loads"]
 
         if "n_point_masses" in self.surface.keys():
-            outputs["total_loads"] += inputs["loads_from_point_masses"]
-            outputs["total_loads"] += inputs["loads_from_thrusts"]
+            total += inputs["loads_from_point_masses"]
+            total += inputs["loads_from_thrusts"]
+        outputs["total_loads"] = total

@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class StructuralCG(om.ExplicitComponent):
@@ -22,40 +28,42 @@ class StructuralCG(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
+    check_partials_options: om.CheckPartialsOptions | None = om.CheckPartialsOptions(differentiator="cs")
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
-
-        self.ny = surface["mesh"].shape[1]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        ny = f.surface["mesh"].shape[1]
+        d = VarDecl()
 
         # Setup Inputs
-        self.add_input("nodes", val=np.zeros((self.ny, 3)), units="m")
-        self.add_input("structural_mass", val=0.0, units="kg")
-        self.add_input("element_mass", val=np.zeros((self.ny - 1)), units="kg")
+        d.add_input("nodes", val=np.zeros((ny, 3)), units="m")
+        d.add_input("structural_mass", val=0.0, units="kg")
+        d.add_input("element_mass", val=np.zeros((ny - 1)), units="kg")
 
         # Setup Outputs
-        self.add_output("cg_location", val=np.zeros((3)), units="m")
+        d.add_output("cg_location", val=np.zeros((3)), units="m")
 
         # Setup Partials
-        self.declare_partials(of="cg_location", wrt="structural_mass")
-        self.declare_partials(of="cg_location", wrt="element_mass")
+        d.declare_partials(of="cg_location", wrt="structural_mass")
+        d.declare_partials(of="cg_location", wrt="element_mass")
         # Setup Sparce Matrix
         dimensions = 3
-        cols_const = np.arange(0, self.ny * dimensions, dimensions)
-        rows = np.empty(self.ny * dimensions)
-        cols = np.empty(self.ny * dimensions)
+        cols_const = np.arange(0, ny * dimensions, dimensions)
+        rows = np.empty(ny * dimensions)
+        cols = np.empty(ny * dimensions)
         for i in range(dimensions):
-            rows[i * self.ny : i * self.ny + self.ny] = i
-            cols[i * self.ny : i * self.ny + self.ny] = cols_const + i
+            rows[i * ny : i * ny + ny] = i
+            cols[i * ny : i * ny + ny] = cols_const + i
 
-        self.declare_partials(of="cg_location", wrt="nodes", rows=rows, cols=cols)
+        d.declare_partials(of="cg_location", wrt="nodes", rows=rows, cols=cols)
+        return d.into(data)
 
-        # Check partials options
-        self.set_check_partial_options("*", method="cs", step=1e-40)
-
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         nodes = inputs["nodes"]
         structural_mass = inputs["structural_mass"]
         element_mass = inputs["element_mass"]
@@ -73,8 +81,8 @@ class StructuralCG(om.ExplicitComponent):
         outputs["cg_location"] = cg_loc
 
     def compute_partials(self, inputs, J):
-        ny = self.ny
         nodes = inputs["nodes"]
+        ny = nodes.shape[0]
         structural_mass = inputs["structural_mass"]
         element_mass = em = inputs["element_mass"]
 
@@ -84,8 +92,8 @@ class StructuralCG(om.ExplicitComponent):
 
         is_sym = self.surface["symmetry"]
 
-        J["cg_location", "structural_mass"] = -sum_coe_dot_em / structural_mass**2
-        J["cg_location", "element_mass"] = center_of_elements / structural_mass
+        dcg_dmass = -sum_coe_dot_em / structural_mass**2
+        dcg_dem = center_of_elements / structural_mass
 
         # derivates with respect to nodes require special ninja math
         values = np.zeros(ny)
@@ -94,13 +102,17 @@ class StructuralCG(om.ExplicitComponent):
         values /= 2 * structural_mass
         dimensions = 3
 
-        J["cg_location", "nodes"] = np.tile(values, dimensions)
+        dcg_dnodes = np.tile(values, dimensions)
         if is_sym:
-            J["cg_location", "nodes"][ny : 2 * ny] = 0
-            J["cg_location", "nodes"] *= 2
+            dcg_dnodes[ny : 2 * ny] = 0
+            dcg_dnodes *= 2
 
-            J["cg_location", "structural_mass"][1] = 0
-            J["cg_location", "structural_mass"] *= 2
+            dcg_dmass[1] = 0
+            dcg_dmass *= 2
 
-            J["cg_location", "element_mass"][1] = 0
-            J["cg_location", "element_mass"] *= 2
+            dcg_dem[1] = 0
+            dcg_dem *= 2
+
+        J["cg_location", "structural_mass"] = dcg_dmass
+        J["cg_location", "element_mass"] = dcg_dem
+        J["cg_location", "nodes"] = dcg_dnodes

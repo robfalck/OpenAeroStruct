@@ -2,8 +2,11 @@ import numpy as np
 import unittest
 from openaerostruct.meshing.mesh_generator import generate_mesh
 from openaerostruct.structures.struct_groups import SpatialBeamAlone
-from openmdao.utils.assert_utils import assert_check_partials, assert_near_equal
-import openmdao.api as om
+import om4.api as om
+from om4.variables.design_var import DesignVar
+from om4.variables.response import Constraint, Objective
+from om4.transforms.transform import AffineTransform
+from om4.utils.assert_utils import assert_near_equal
 
 upper_x = np.array(
     [
@@ -59,7 +62,6 @@ upper_x = np.array(
         0.59,
         0.6,
     ],
-    dtype="complex128",
 )
 lower_x = np.array(
     [
@@ -115,7 +117,6 @@ lower_x = np.array(
         0.59,
         0.6,
     ],
-    dtype="complex128",
 )
 upper_y = np.array(
     [
@@ -171,7 +172,6 @@ upper_y = np.array(
         0.0547,
         0.0541,
     ],
-    dtype="complex128",
 )
 lower_y = np.array(
     [
@@ -227,7 +227,6 @@ lower_y = np.array(
         -0.0458,
         -0.0444,
     ],
-    dtype="complex128",
 )
 
 
@@ -288,51 +287,53 @@ class Test(unittest.TestCase):
         }
 
         # Create the problem and assign the model group
-        prob = om.Problem()
+        subsystems = {}
+        connections = []
 
         ny = surf_dict["mesh"].shape[1]
 
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("loads", val=np.ones((ny, 6)) * 2e5, units="N")
-        indep_var_comp.add_output("load_factor", val=1.0)
-        indep_var_comp.add_output("fuel_mass", val=10000.0, units="kg")
         struct_group = SpatialBeamAlone(surface=surf_dict)
         # Add indep_vars to the structural group
-        struct_group.add_subsystem("indep_vars", indep_var_comp, promotes=["*"])
-        prob.model.add_subsystem(surf_dict["name"], struct_group)
+        subsystems[surf_dict["name"]] = struct_group
         if surf_dict["distributed_fuel_weight"]:
-            prob.model.connect("wing.fuel_mass", "wing.struct_states.fuel_mass")
-            prob.model.connect("wing.struct_setup.fuel_vols", "wing.struct_states.fuel_vols")
-
-        prob.driver = om.ScipyOptimizeDriver()
-        prob.driver.options["tol"] = 1e-9
+            connections.append(om.Connection(src="wing.struct_setup.fuel_vols", tgt="wing.struct_states.fuel_vols"))
 
         # Setup problem and add design variables, constraint, and objective
-        prob.model.add_design_var("wing.spar_thickness_cp", lower=0.01, upper=0.5, ref=1e-1)
-        prob.model.add_design_var("wing.skin_thickness_cp", lower=0.01, upper=0.5, ref=1e-1)
-        prob.model.add_constraint("wing.failure", upper=0.0)
         # prob.model.add_constraint('wing.thickness_intersects', upper=0.)
 
         # Add design variables, constraisnt, and objective on the problem
-        prob.model.add_objective("wing.structural_mass", scaler=1e-5)
 
         # Set up the problem
-        prob.setup()
+        prob = om.Problem(
+            model=om.Group(
+                subsystems=subsystems,
+                connections=connections,
+                design_vars={
+                    "wing.spar_thickness_cp": DesignVar(
+                        lower=0.01, upper=0.5, transform=AffineTransform.from_ref_ref0(ref=1e-1)
+                    ),
+                    "wing.skin_thickness_cp": DesignVar(
+                        lower=0.01, upper=0.5, transform=AffineTransform.from_ref_ref0(ref=1e-1)
+                    ),
+                },
+                constraints={"wing.failure": Constraint(upper=0.0)},
+                objectives={
+                    "wing.structural_mass": Objective(transform=AffineTransform.from_scaler_adder(scaler=1e-5))
+                },
+                optimizer=om.ScipyMinimizeOptimizer(tol=1e-9, optimizer="SLSQP"),
+            )
+        )
+        prob.set_val(surf_dict["name"] + ".loads", np.ones((ny, 6)) * 2e5, units="N")
+        prob.set_val(surf_dict["name"] + ".load_factor", 1.0)
+        prob.set_val(surf_dict["name"] + ".struct_states.fuel_mass", 10000.0, units="kg")
 
         prob.run_model()
 
-        # the list of components that uses CS to compute derivatives. We exclude them from check_partials
-        excludes_list = [
-            "wing.wingbox_group.wingbox",
-            "wing.struct_setup.fuel_vol",
-            "wing.struct_states.fuel_loads",
-            "wing.struct_funcs.vonmises",
-        ]
-        data = prob.check_partials(compact_print=True, out_stream=None, excludes=excludes_list, method="cs")
-        assert_check_partials(data, atol=1e20, rtol=1e-6)
+        data = prob.check_partials(differentiator="cs", only_incorrect=True, atol=1e-1, rtol=1e-4)
+        assert not data, {c: {k: (v["abs_error"], v["rel_error"]) for k, v in d.items()} for c, d in data.items()}
 
-        prob.run_driver()
-        assert_near_equal(prob["wing.structural_mass"], 16932.20046986, 1e-6)
+        prob.run_optimizer()
+        assert_near_equal(prob.get_val("wing.structural_mass"), 16932.20046986, 1e-6)
 
 
 if __name__ == "__main__":

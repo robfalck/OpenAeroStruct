@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class SectionPropertiesTube(om.ExplicitComponent):
@@ -28,26 +34,30 @@ class SectionPropertiesTube(om.ExplicitComponent):
         Polar moment of inertia for each FEM element.
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
+    check_partials_options: om.CheckPartialsOptions | None = om.CheckPartialsOptions(differentiator="cs")
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        ny = f.surface["mesh"].shape[1]
+        d = VarDecl()
 
-        self.ny = surface["mesh"].shape[1]
+        d.add_input("radius", val=np.ones((ny - 1)), units="m")
+        d.add_input("thickness", val=np.ones((ny - 1)) * 0.1, units="m")
+        d.add_output("A", val=np.zeros((ny - 1)), units="m**2")
+        d.add_output("Iy", val=np.zeros((ny - 1)), units="m**4")
+        d.add_output("Iz", val=np.zeros((ny - 1)), units="m**4")
+        d.add_output("J", val=np.zeros((ny - 1)), units="m**4")
 
-        self.add_input("radius", val=np.ones((self.ny - 1)), units="m")
-        self.add_input("thickness", val=np.ones((self.ny - 1)) * 0.1, units="m")
-        self.add_output("A", val=np.zeros((self.ny - 1)), units="m**2")
-        self.add_output("Iy", val=np.zeros((self.ny - 1)), units="m**4")
-        self.add_output("Iz", val=np.zeros((self.ny - 1)), units="m**4")
-        self.add_output("J", val=np.zeros((self.ny - 1)), units="m**4")
+        a = np.arange((ny - 1))
+        d.declare_partials("*", "*", rows=a, cols=a)
+        return d.into(data)
 
-        a = np.arange((self.ny - 1))
-        self.declare_partials("*", "*", rows=a, cols=a)
-        self.set_check_partial_options(wrt="*", method="cs")
-
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         pi = np.pi
 
         # Add thickness to the interior of the radius.
@@ -63,8 +73,8 @@ class SectionPropertiesTube(om.ExplicitComponent):
 
     def compute_partials(self, inputs, partials):
         pi = np.pi
-        radius = inputs["radius"].real
-        t = inputs["thickness"].real
+        radius = inputs["radius"]
+        t = inputs["thickness"]
         r1 = radius - t
         r2 = radius
 

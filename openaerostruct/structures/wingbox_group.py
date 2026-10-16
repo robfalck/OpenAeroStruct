@@ -1,71 +1,62 @@
-import openmdao.api as om
+from typing import Any
+
+from pydantic import Field, model_validator
+from pydantic_core import PydanticUndefined
+
+import om4.api as om
+from om4.core.system import System
+from om4.utils.polymorphic import Polymorphic
+
 from openaerostruct.structures.section_properties_wingbox import SectionPropertiesWingbox
+from openaerostruct.structures.tube_group import _span_spline
 from openaerostruct.structures.wingbox_geometry import WingboxGeometry
-from openaerostruct.utils.interpolation import get_normalized_span_coords
+from openaerostruct.utils.om4_utils import field_values
+from openaerostruct.utils.surface import Surface
+
+
+def _wingbox_group_kwargs(surface: Surface) -> dict:
+    subs = {}
+    input_defaults = {}
+
+    for cp_key, name in (("spar_thickness_cp", "spar_thickness"), ("skin_thickness_cp", "skin_thickness")):
+        if cp_key in surface:
+            subs[f"{name}_bsp"], input_defaults[cp_key] = _span_spline(surface, cp_key, name, "m")
+
+    subs["wingbox_geometry"] = WingboxGeometry(
+        surface=surface,
+        promotes_inputs=["mesh"],
+        promotes_outputs=["fem_chords", "fem_twists", "streamwise_chords"],
+    )
+
+    subs["wingbox"] = SectionPropertiesWingbox(
+        surface=surface,
+        promotes_inputs=[
+            "spar_thickness",
+            "skin_thickness",
+            "t_over_c",
+            "fem_chords",
+            "fem_twists",
+            "streamwise_chords",
+        ],
+        promotes_outputs=["A", "Iy", "Qz", "Iz", "J", "A_enc", "A_int", "htop", "hbottom", "hfront", "hrear"],
+    )
+    return {"subsystems": subs, "input_defaults": input_defaults}
 
 
 class WingboxGroup(om.Group):
     """Group that contains everything needed for a structural-only problem."""
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        surface = self.options["surface"]
+    # Derived from `surface`; not part of the constructor API.
+    subsystems: dict[str, Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
+    input_defaults: dict[str, om.InputDefault] = Field(default=PydanticUndefined, init=False)
 
-        if "spar_thickness_cp" in surface.keys():
-            n_cp = len(surface["spar_thickness_cp"])
-            # Add bspline components for active bspline geometric variables.
-            x_interp = get_normalized_span_coords(surface, mid_panel=True)
-            comp = self.add_subsystem(
-                "spar_thickness_bsp",
-                om.SplineComp(
-                    method="bsplines",
-                    x_interp_val=x_interp,
-                    num_cp=n_cp,
-                    interp_options={"order": min(n_cp, 4), "x_cp_start": 0, "x_cp_end": 1},
-                ),
-                promotes_inputs=["spar_thickness_cp"],
-                promotes_outputs=["spar_thickness"],
-            )
-            comp.add_spline(y_cp_name="spar_thickness_cp", y_interp_name="spar_thickness", y_units="m")
-            self.set_input_defaults("spar_thickness_cp", val=surface["spar_thickness_cp"], units="m")
-
-        if "skin_thickness_cp" in surface.keys():
-            n_cp = len(surface["skin_thickness_cp"])
-            # Add bspline components for active bspline geometric variables.
-            x_interp = get_normalized_span_coords(surface, mid_panel=True)
-            comp = self.add_subsystem(
-                "skin_thickness_bsp",
-                om.SplineComp(
-                    method="bsplines",
-                    x_interp_val=x_interp,
-                    num_cp=n_cp,
-                    interp_options={"order": min(n_cp, 4), "x_cp_start": 0, "x_cp_end": 1},
-                ),
-                promotes_inputs=["skin_thickness_cp"],
-                promotes_outputs=["skin_thickness"],
-            )
-            comp.add_spline(y_cp_name="skin_thickness_cp", y_interp_name="skin_thickness", y_units="m")
-            self.set_input_defaults("skin_thickness_cp", val=surface["skin_thickness_cp"], units="m")
-
-        self.add_subsystem(
-            "wingbox_geometry",
-            WingboxGeometry(surface=surface),
-            promotes_inputs=["mesh"],
-            promotes_outputs=["fem_chords", "fem_twists", "streamwise_chords"],
-        )
-
-        self.add_subsystem(
-            "wingbox",
-            SectionPropertiesWingbox(surface=surface),
-            promotes_inputs=[
-                "spar_thickness",
-                "skin_thickness",
-                "t_over_c",
-                "fem_chords",
-                "fem_twists",
-                "streamwise_chords",
-            ],
-            promotes_outputs=["A", "Iy", "Qz", "Iz", "J", "A_enc", "A_int", "htop", "hbottom", "hfront", "hrear"],
-        )
+    @model_validator(mode="before")
+    @classmethod
+    def _build_from_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        data.update(_wingbox_group_kwargs(f.surface))
+        return data

@@ -1,5 +1,5 @@
 import unittest
-import openmdao.api as om
+import numpy as np
 
 from openaerostruct.transfer.displacement_transfer import DisplacementTransfer
 from openaerostruct.utils.testing import run_test, get_default_surfaces
@@ -11,18 +11,18 @@ class Test(unittest.TestCase):
 
         comp = DisplacementTransfer(surface=surface)
 
-        group = om.Group()
-
-        indep_var_comp = om.IndepVarComp()
-
         mesh = surface["mesh"]
+        nx, ny = mesh.shape[:2]
 
-        indep_var_comp.add_output("mesh", val=mesh, units="m")
+        rng = np.random.default_rng(0)
+        values = {
+            "comp.mesh": mesh,
+            "comp.disp": rng.random((ny, 6)),
+            "comp.transformation_matrix": rng.random((ny, 3, 3)),
+            "comp.nodes": rng.random((ny, 3)),
+        }
 
-        group.add_subsystem("indep_var_comp", indep_var_comp, promotes=["*"])
-        group.add_subsystem("load", comp, promotes=["*"])
-
-        run_test(self, group, complex_flag=True)
+        run_test(self, comp, method="cs", values=values)
 
 
 if __name__ == "__main__":

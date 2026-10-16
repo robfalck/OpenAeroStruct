@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class NonIntersectingThickness(om.ExplicitComponent):
@@ -22,25 +28,28 @@ class NonIntersectingThickness(om.ExplicitComponent):
         If all the values are negative, each element does not intersect itself.
         If a value is positive, then the thickness within the hollow spar
         intersects itself and presents an impossible design.
-        Add a constraint as
-        `OASProblem.add_constraint('thickness_intersects', upper=0.)`
+        Add a constraint on 'thickness_intersects' with upper=0.
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        ny = f.surface["mesh"].shape[1]
+        d = VarDecl()
 
-        self.ny = surface["mesh"].shape[1]
+        d.add_input("thickness", val=np.zeros((ny - 1)), units="m")
+        d.add_input("radius", val=np.zeros((ny - 1)), units="m")
+        d.add_output("thickness_intersects", val=np.zeros((ny - 1)), units="m")
 
-        self.add_input("thickness", val=np.zeros((self.ny - 1)), units="m")
-        self.add_input("radius", val=np.zeros((self.ny - 1)), units="m")
-        self.add_output("thickness_intersects", val=np.zeros((self.ny - 1)), units="m")
+        arange = np.arange(ny - 1)
+        d.declare_partials("thickness_intersects", "thickness", rows=arange, cols=arange, val=1.0)
+        d.declare_partials("thickness_intersects", "radius", rows=arange, cols=arange, val=-1.0)
+        return d.into(data)
 
-        arange = np.arange(self.ny - 1)
-        self.declare_partials("thickness_intersects", "thickness", rows=arange, cols=arange, val=1.0)
-        self.declare_partials("thickness_intersects", "radius", rows=arange, cols=arange, val=-1.0)
-
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         outputs["thickness_intersects"] = inputs["thickness"] - inputs["radius"]

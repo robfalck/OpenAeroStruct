@@ -1,6 +1,13 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.structures.utils import failure_criteria
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class FailureExact(om.ExplicitComponent):
@@ -23,53 +30,32 @@ class FailureExact(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        surface = self.options["surface"]
-        self.useComposite = "useComposite" in self.options["surface"].keys() and self.options["surface"]["useComposite"]
-        if self.useComposite:
-            ply_angles = surface["ply_angles"]
-            num_plies = len(ply_angles)
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        ny = f.surface["mesh"].shape[1]
+        use_composite, num_failure_criteria, limit = failure_criteria(f.surface)
+        d = VarDecl()
 
-        if "safety_factor" in self.options["surface"].keys():
-            safety_factor = surface["safety_factor"]
+        if use_composite:
+            d.add_input("tsaiwu_sr", val=np.zeros((ny - 1, num_failure_criteria)), units=None)
         else:
-            safety_factor = 1
+            d.add_input("vonmises", val=np.zeros((ny - 1, num_failure_criteria)), units="N/m**2")
 
-        if surface["fem_model_type"].lower() == "tube":
-            num_failure_criteria = 2
+        d.add_output("failure", val=np.zeros((ny - 1, num_failure_criteria)))
 
-        elif surface["fem_model_type"].lower() == "wingbox":
-            if self.useComposite:  # using the Composite wingbox
-                num_failure_criteria = 4 * num_plies  # 4 critical elements * number of plies
-                self.srlimit = 1 / safety_factor
-            else:  # using the Isotropic wingbox
-                num_failure_criteria = 4
+        n = (ny - 1) * num_failure_criteria
+        d.declare_partials(
+            "failure", "tsaiwu_sr" if use_composite else "vonmises", rows=np.arange(n), cols=np.arange(n), val=1 / limit
+        )
+        return d.into(data)
 
-        self.ny = surface["mesh"].shape[1]
-
-        self.sigma = surface["yield"] / safety_factor
-
-        if self.useComposite:  # using the Composite wingbox
-            self.add_input("tsaiwu_sr", val=np.zeros((self.ny - 1, num_failure_criteria)), units=None)
-        else:  # using the Isotropic structures
-            self.add_input("vonmises", val=np.zeros((self.ny - 1, num_failure_criteria)), units="N/m**2")
-
-        self.add_output("failure", val=np.zeros((self.ny - 1, num_failure_criteria)))
-
-        if self.useComposite:  # using the Composite wingbox
-            self.declare_partials(
-                "failure", "tsaiwu_sr", val=np.eye(((self.ny - 1) * num_failure_criteria)) / self.srlimit
-            )
-        else:  # using the Isotropic structures
-            self.declare_partials(
-                "failure", "vonmises", val=np.eye(((self.ny - 1) * num_failure_criteria)) / self.sigma
-            )
-
-    def compute(self, inputs, outputs):
-        if "vonmises" in inputs:
-            outputs["failure"] = inputs["vonmises"] / self.sigma - 1
-        elif "tsaiwu_sr" in inputs:
-            outputs["failure"] = inputs["tsaiwu_sr"] / self.srlimit - 1
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        use_composite, _, limit = failure_criteria(self.surface)
+        stress = inputs["tsaiwu_sr"] if use_composite else inputs["vonmises"]
+        outputs["failure"] = stress / limit - 1

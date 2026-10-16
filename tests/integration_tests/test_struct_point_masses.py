@@ -1,11 +1,10 @@
-from openmdao.utils.assert_utils import assert_near_equal
+import om4.api as om
+from om4.utils.assert_utils import assert_near_equal
 import unittest
 import numpy as np
 
 from openaerostruct.meshing.mesh_generator import generate_mesh
 from openaerostruct.structures.struct_groups import SpatialBeamAlone
-
-import openmdao.api as om
 
 
 class Test(unittest.TestCase):
@@ -38,35 +37,30 @@ class Test(unittest.TestCase):
         }
 
         # Create the problem and assign the model group
-        prob = om.Problem()
+        subsystems = {}
+        connections = []
 
         ny = surface["mesh"].shape[1]
         surface["n_point_masses"] = 1
-
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("loads", val=np.zeros((ny, 6)), units="N")
-        indep_var_comp.add_output("load_factor", val=1.0)
 
         point_masses = np.array([[10.0]])
 
         point_mass_locations = np.array([[1.5, -10.0, 0.0]])
 
-        indep_var_comp.add_output("point_masses", val=point_masses, units="kg")
-        indep_var_comp.add_output("point_mass_locations", val=point_mass_locations, units="m")
+        struct_group = SpatialBeamAlone(surface=surface, promotes_inputs=["*"], promotes_outputs=["*"])
 
-        struct_group = SpatialBeamAlone(surface=surface)
-
-        # Add indep_vars to the structural group
-        struct_group.add_subsystem("indep_vars", indep_var_comp, promotes=["*"])
-
-        prob.model.add_subsystem(surface["name"], struct_group, promotes=["*"])
+        subsystems[surface["name"]] = struct_group
 
         # Set up the problem
-        prob.setup()
+        prob = om.Problem(model=om.Group(subsystems=subsystems, connections=connections))
+        prob.set_val("loads", np.zeros((ny, 6)), units="N")
+        prob.set_val("load_factor", 1.0)
+        prob.set_val("point_masses", point_masses, units="kg")
+        prob.set_val("point_mass_locations", point_mass_locations, units="m")
 
         prob.run_model()
 
-        assert_near_equal(prob["vonmises"][-1, 0], 2956850.70882332, 1e-4)
+        assert_near_equal(prob.get_val("vonmises")[-1, 0], 2956850.70882332, 1e-4)
 
     def test_multiple_masses(self):
         # Create a dictionary to store options about the surface
@@ -97,35 +91,30 @@ class Test(unittest.TestCase):
         }
 
         # Create the problem and assign the model group
-        prob = om.Problem()
+        subsystems = {}
+        connections = []
 
         ny = surface["mesh"].shape[1]
         surface["n_point_masses"] = 2
-
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("loads", val=np.zeros((ny, 6)), units="N")
-        indep_var_comp.add_output("load_factor", val=1.0)
 
         point_masses = np.array([[10.0, 20.0]])
 
         point_mass_locations = np.array([[1.5, -1.0, 0.0], [1.5, -2.0, 0.0]])
 
-        indep_var_comp.add_output("point_masses", val=point_masses, units="kg")
-        indep_var_comp.add_output("point_mass_locations", val=point_mass_locations, units="m")
+        struct_group = SpatialBeamAlone(surface=surface, promotes_inputs=["*"], promotes_outputs=["*"])
 
-        struct_group = SpatialBeamAlone(surface=surface)
-
-        # Add indep_vars to the structural group
-        struct_group.add_subsystem("indep_vars", indep_var_comp, promotes=["*"])
-
-        prob.model.add_subsystem(surface["name"], struct_group, promotes=["*"])
+        subsystems[surface["name"]] = struct_group
 
         # Set up the problem
-        prob.setup()
+        prob = om.Problem(model=om.Group(subsystems=subsystems, connections=connections))
+        prob.set_val("loads", np.zeros((ny, 6)), units="N")
+        prob.set_val("load_factor", 1.0)
+        prob.set_val("point_masses", point_masses, units="kg")
+        prob.set_val("point_mass_locations", point_mass_locations, units="m")
 
         prob.run_model()
 
-        assert_near_equal(prob["vonmises"][-1, 0], 1557126.5793494075, 1e-4)
+        assert_near_equal(prob.get_val("vonmises")[-1, 0], 1557126.5793494075, 1e-4)
 
 
 if __name__ == "__main__":

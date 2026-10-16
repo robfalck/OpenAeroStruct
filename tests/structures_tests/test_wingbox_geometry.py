@@ -1,7 +1,6 @@
 import unittest
 import numpy as np
 
-import openmdao.api as om
 from openaerostruct.structures.wingbox_geometry import WingboxGeometry
 from openaerostruct.utils.testing import run_test, get_default_surfaces
 
@@ -65,7 +64,6 @@ class Test(unittest.TestCase):
                 0.59,
                 0.6,
             ],
-            dtype="complex128",
         )
 
         surface["data_x_lower"] = np.array(
@@ -122,7 +120,6 @@ class Test(unittest.TestCase):
                 0.59,
                 0.6,
             ],
-            dtype="complex128",
         )
         surface["data_y_upper"] = np.array(
             [
@@ -178,7 +175,6 @@ class Test(unittest.TestCase):
                 0.0547,
                 0.0541,
             ],
-            dtype="complex128",
         )
         surface["data_y_lower"] = np.array(
             [
@@ -234,21 +230,11 @@ class Test(unittest.TestCase):
                 -0.0458,
                 -0.0444,
             ],
-            dtype="complex128",
         )
 
         comp = WingboxGeometry(surface=surface)
 
-        group = om.Group()
-
-        indep_var_comp = om.IndepVarComp()
-
-        indep_var_comp.add_output("mesh", val=surface["mesh"])
-
-        group.add_subsystem("indep_var_comp", indep_var_comp, promotes=["*"])
-        group.add_subsystem("wingbox_geometry", comp, promotes=["*"])
-
-        run_test(self, group, complex_flag=True)
+        run_test(self, comp)
 
 
 if __name__ == "__main__":

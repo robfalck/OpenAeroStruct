@@ -1,6 +1,15 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+from om4.derivatives.complex_step import ComplexStep
+from om4.derivatives.differentiator import Differentiator
+from om4.utils.polymorphic import Polymorphic
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class SectionPropertiesWingbox(om.ExplicitComponent):
@@ -59,63 +68,58 @@ class SectionPropertiesWingbox(om.ExplicitComponent):
         from the local-y neutral axis (for each wingbox segment).
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
+    differentiator: Polymorphic[Differentiator] | None = ComplexStep()
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        ny = f.surface["mesh"].shape[1]
+        d = VarDecl()
 
-        self.mesh = surface["mesh"]
-        self.ny = self.mesh.shape[1]
+        d.add_input("streamwise_chords", val=np.ones((ny - 1)), units="m")
+        d.add_input("fem_chords", val=np.ones((ny - 1)), units="m")
+        d.add_input("fem_twists", val=np.ones((ny - 1)), units="deg")
 
-        # original thickness-to-chord ratio of the airfoil provided by the user
-        self.orig_wb_af_t_over_c = surface["original_wingbox_airfoil_t_over_c"]
+        d.add_input("spar_thickness", val=np.ones((ny - 1)), units="m")
+        d.add_input("skin_thickness", val=np.ones((ny - 1)), units="m")
+        d.add_input("t_over_c", val=np.ones((ny - 1)))
 
-        # airfoil coordinates provided by the user
-        self.data_x_upper = surface["data_x_upper"]
-        self.data_x_lower = surface["data_x_lower"]
-        self.data_y_upper = surface["data_y_upper"]
-        self.data_y_lower = surface["data_y_lower"]
+        d.add_output("A", val=np.ones((ny - 1)), units="m**2")
+        d.add_output("A_enc", val=np.ones((ny - 1)), units="m**2")
+        d.add_output("A_int", val=np.ones((ny - 1)), units="m**2")
+        d.add_output("Iy", val=np.ones((ny - 1)), units="m**4")
+        d.add_output("Qz", val=np.ones((ny - 1)), units="m**3")
+        d.add_output("Iz", val=np.ones((ny - 1)), units="m**4")
+        d.add_output("J", val=np.ones((ny - 1)), units="m**4")
+        d.add_output("htop", val=np.ones((ny - 1)), units="m")
+        d.add_output("hbottom", val=np.ones((ny - 1)), units="m")
+        d.add_output("hfront", val=np.ones((ny - 1)), units="m")
+        d.add_output("hrear", val=np.ones((ny - 1)), units="m")
 
-        self.add_input("streamwise_chords", val=np.ones((self.ny - 1)), units="m")
-        self.add_input("fem_chords", val=np.ones((self.ny - 1)), units="m")
-        self.add_input("fem_twists", val=np.ones((self.ny - 1)), units="deg")
+        d.declare_partials("*", "*")
+        return d.into(data)
 
-        self.add_input("spar_thickness", val=np.ones((self.ny - 1)), units="m")
-        self.add_input("skin_thickness", val=np.ones((self.ny - 1)), units="m")
-        self.add_input("t_over_c", val=np.ones((self.ny - 1)))
-
-        self.add_output("A", val=np.ones((self.ny - 1)), units="m**2")
-        self.add_output("A_enc", val=np.ones((self.ny - 1)), units="m**2")
-        self.add_output("A_int", val=np.ones((self.ny - 1)), units="m**2")
-        self.add_output("Iy", val=np.ones((self.ny - 1)), units="m**4")
-        self.add_output("Qz", val=np.ones((self.ny - 1)), units="m**3")
-        self.add_output("Iz", val=np.ones((self.ny - 1)), units="m**4")
-        self.add_output("J", val=np.ones((self.ny - 1)), units="m**4")
-        self.add_output("htop", val=np.ones((self.ny - 1)), units="m")
-        self.add_output("hbottom", val=np.ones((self.ny - 1)), units="m")
-        self.add_output("hfront", val=np.ones((self.ny - 1)), units="m")
-        self.add_output("hrear", val=np.ones((self.ny - 1)), units="m")
-
-        self.declare_partials("*", "*", method="cs")
-
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         # NOTE: In the code below, the x- and y-axes correspond to the element
         # local z- and y-axes, respectively.
 
         chord = inputs["fem_chords"]
         spar_thickness = inputs["spar_thickness"]
         skin_thickness = inputs["skin_thickness"]
-        t_over_c_original = self.orig_wb_af_t_over_c
+        t_over_c_original = self.surface["original_wingbox_airfoil_t_over_c"]
         t_over_c = inputs["t_over_c"]
         streamwise_chord = inputs["streamwise_chords"]
         theta = inputs["fem_twists"]
 
         # Scale data points with chord
-        data_x_upper = np.outer(self.data_x_upper, chord)
-        data_y_upper = np.outer(self.data_y_upper, chord)
-        data_x_lower = np.outer(self.data_x_lower, chord)
-        data_y_lower = np.outer(self.data_y_lower, chord)
+        data_x_upper = np.outer(self.surface["data_x_upper"], chord)
+        data_y_upper = np.outer(self.surface["data_y_upper"], chord)
+        data_x_lower = np.outer(self.surface["data_x_lower"], chord)
+        data_y_lower = np.outer(self.surface["data_y_lower"], chord)
 
         # Scale y-coordinates by t/c design variable which is streamwise t/c
         data_y_upper *= t_over_c / t_over_c_original * streamwise_chord / chord

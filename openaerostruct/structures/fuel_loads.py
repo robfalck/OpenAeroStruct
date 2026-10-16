@@ -1,6 +1,15 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+from om4.derivatives.complex_step import ComplexStep
+from om4.derivatives.differentiator import Differentiator
+from om4.utils.polymorphic import Polymorphic
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 from openaerostruct.utils.constants import grav_constant
 
 
@@ -17,26 +26,34 @@ class FuelLoads(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
+    differentiator: Polymorphic[Differentiator] | None = ComplexStep()
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
-        self.ny = surface["mesh"].shape[1]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        ny = f.surface["mesh"].shape[1]
+        d = VarDecl()
 
-        self.add_input("fuel_vols", val=np.ones((self.ny - 1)), units="m**3")
-        self.add_input("nodes", val=np.zeros((self.ny, 3)), units="m")
-        self.add_input("fuel_mass", val=1.0, units="kg")
-        self.add_input("load_factor", val=1.0)
-        self.add_output("fuel_weight_loads", val=np.zeros((self.ny, 6)), units="N")
+        d.add_input("fuel_vols", val=np.ones((ny - 1)), units="m**3")
+        d.add_input("nodes", val=np.zeros((ny, 3)), units="m")
+        d.add_input("fuel_mass", val=1.0, units="kg")
+        d.add_input("load_factor", val=1.0)
+        d.add_output("fuel_weight_loads", val=np.zeros((ny, 6)), units="N")
 
-        self.declare_partials("*", "*", method="cs")
+        d.declare_partials("*", "*")
+        return d.into(data)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         nodes = inputs["nodes"]
+        ny = nodes.shape[0]
+        dtype = np.result_type(nodes, inputs["fuel_vols"], inputs["fuel_mass"], inputs["load_factor"])
 
-        element_lengths = np.ones(self.ny - 1, dtype=complex)
-        for i in range(self.ny - 1):
+        element_lengths = np.ones(ny - 1, dtype=dtype)
+        for i in range(ny - 1):
             element_lengths[i] = norm(nodes[i + 1] - nodes[i])
 
         # And we also need the deltas between consecutive nodes
@@ -61,7 +78,7 @@ class FuelLoads(om.ExplicitComponent):
             z_weights * element_lengths / 12.0 * (deltas[:, 0] ** 2 + deltas[:, 1] ** 2) ** 0.5 / element_lengths
         )
 
-        loads = np.zeros((self.ny, 6), dtype=complex)
+        loads = np.zeros((ny, 6), dtype=dtype)
 
         # Loads in z-direction
         loads[:-1, 2] = loads[:-1, 2] - z_forces_for_each

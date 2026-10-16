@@ -1,7 +1,12 @@
+from typing import Any
+
 import numpy as np
+from pydantic import model_validator
 
-import openmdao.api as om
+import om4.api as om
 
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 from openaerostruct.utils.vector_algebra import get_array_indices
 
 
@@ -34,73 +39,76 @@ class ComputeTransformationMatrix(om.ExplicitComponent):
         a moment arm).
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
-        mesh = surface["mesh"]
-        self.nx = mesh.shape[0]
-        self.ny = mesh.shape[1]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        ny = f.surface["mesh"].shape[1]
+        d = VarDecl()
 
-        self.add_input("disp", val=np.zeros((self.ny, 6)), units="m")
-        self.add_output("transformation_matrix", shape=(self.ny, 3, 3))
+        d.add_input("disp", val=np.zeros((ny, 6)), units="m")
+        d.add_output("transformation_matrix", val=np.zeros((ny, 3, 3)))
 
         # Create index arrays for each relevant input and output.
         # This allows us to set up the rows and cols for the sparse Jacobians.
-        transform_indices = get_array_indices(self.ny, 3, 3)
+        transform_indices = get_array_indices(ny, 3, 3)
 
         # Set up the rows and cols for `transformation_matrix` wrt `disp`
         rows = np.einsum("ijk,l->ijkl", transform_indices, np.ones(3, int)).flatten()
-        cols = np.einsum("il,jk->ijkl", get_array_indices(self.ny, 6)[:, 3:], np.ones((3, 3), int)).flatten()
-        self.declare_partials("transformation_matrix", "disp", rows=rows, cols=cols)
+        cols = np.einsum("il,jk->ijkl", get_array_indices(ny, 6)[:, 3:], np.ones((3, 3), int)).flatten()
+        d.declare_partials("transformation_matrix", "disp", rows=rows, cols=cols)
+        return d.into(data)
 
-    def compute(self, inputs, outputs):
-        # We populate the diagonal of each transformation matrix to account
-        # for the equivalent identity matrices we're adding in later steps.
-        # We need to do this because we're treating the three rotational
-        # matrices as independent and combining them all by adding.
-        outputs["transformation_matrix"] = 0.0
-        for i in range(3):
-            outputs["transformation_matrix"][:, i, i] -= 2.0
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        disp = inputs["disp"]
+        ny = disp.shape[0]
 
         # These are the rotations obtained from the FEM solution
-        rx = inputs["disp"][:, 3]
-        ry = inputs["disp"][:, 4]
-        rz = inputs["disp"][:, 5]
+        rx = disp[:, 3]
+        ry = disp[:, 4]
+        rz = disp[:, 5]
 
-        # We then apply rotations to each corresponding entry in the
-        # transformation matrix, cumulatively adding or subtracting to
-        # obtain the final result.
+        # The diagonal of each transformation matrix accounts for the equivalent identity matrices
+        # that are added in later steps, because the three rotational matrices are treated as
+        # independent and combined by adding.
+        T = np.zeros((ny, 3, 3), dtype=disp.dtype)
+        for i in range(3):
+            T[:, i, i] -= 2.0
 
         # T[ 1:,  1:] += [[cos(rx), -sin(rx)], [ sin(rx), cos(rx)]]
-        outputs["transformation_matrix"][:, 1, 1] += np.cos(rx)
-        outputs["transformation_matrix"][:, 1, 2] -= np.sin(rx)
-        outputs["transformation_matrix"][:, 2, 1] += np.sin(rx)
-        outputs["transformation_matrix"][:, 2, 2] += np.cos(rx)
+        T[:, 1, 1] += np.cos(rx)
+        T[:, 1, 2] -= np.sin(rx)
+        T[:, 2, 1] += np.sin(rx)
+        T[:, 2, 2] += np.cos(rx)
 
         # T[::2, ::2] += [[cos(ry),  sin(ry)], [-sin(ry), cos(ry)]]
-        outputs["transformation_matrix"][:, 0, 0] += np.cos(ry)
-        outputs["transformation_matrix"][:, 0, 2] += np.sin(ry)
-        outputs["transformation_matrix"][:, 2, 0] -= np.sin(ry)
-        outputs["transformation_matrix"][:, 2, 2] += np.cos(ry)
+        T[:, 0, 0] += np.cos(ry)
+        T[:, 0, 2] += np.sin(ry)
+        T[:, 2, 0] -= np.sin(ry)
+        T[:, 2, 2] += np.cos(ry)
 
         # T[ :2,  :2] += [[cos(rz), -sin(rz)], [ sin(rz), cos(rz)]]
-        outputs["transformation_matrix"][:, 0, 0] += np.cos(rz)
-        outputs["transformation_matrix"][:, 0, 1] -= np.sin(rz)
-        outputs["transformation_matrix"][:, 1, 0] += np.sin(rz)
-        outputs["transformation_matrix"][:, 1, 1] += np.cos(rz)
+        T[:, 0, 0] += np.cos(rz)
+        T[:, 0, 1] -= np.sin(rz)
+        T[:, 1, 0] += np.sin(rz)
+        T[:, 1, 1] += np.cos(rz)
+
+        outputs["transformation_matrix"] = T
 
     def compute_partials(self, inputs, partials):
-        # Because of the way this is constructed, the derivatives are rather
-        # straightforward. We simply take the trigonometric deriv for each
-        # entry in the matrix.
-        rx = inputs["disp"][:, 3]
-        ry = inputs["disp"][:, 4]
-        rz = inputs["disp"][:, 5]
+        disp = inputs["disp"]
+        ny = disp.shape[0]
+        rx = disp[:, 3]
+        ry = disp[:, 4]
+        rz = disp[:, 5]
 
-        derivs = partials["transformation_matrix", "disp"].reshape((self.ny, 3, 3, 3))
-        derivs[:, :, :, :] = 0.0
+        # Each entry of the matrix is a sum of sines and cosines, so the derivatives are the
+        # trigonometric derivatives of those terms.
+        derivs = np.zeros((ny, 3, 3, 3))
 
         derivs[:, 1, 1, 0] -= np.sin(rx)
         derivs[:, 1, 2, 0] -= np.cos(rx)
@@ -116,3 +124,5 @@ class ComputeTransformationMatrix(om.ExplicitComponent):
         derivs[:, 0, 1, 2] -= np.cos(rz)
         derivs[:, 1, 0, 2] += np.cos(rz)
         derivs[:, 1, 1, 2] -= np.sin(rz)
+
+        partials["transformation_matrix", "disp"] = derivs.flatten()

@@ -1,11 +1,10 @@
-from openmdao.utils.assert_utils import assert_near_equal
+import om4.api as om
+from om4.utils.assert_utils import assert_near_equal
 import unittest
 import numpy as np
 
 from openaerostruct.meshing.mesh_generator import generate_mesh
 from openaerostruct.structures.struct_groups import SpatialBeamAlone
-
-import openmdao.api as om
 
 
 class Test(unittest.TestCase):
@@ -46,42 +45,33 @@ class Test(unittest.TestCase):
         }
 
         # Create the problem and assign the model group
-        prob = om.Problem()
+        subsystems = {}
+        connections = []
 
         ny = surf_dict["mesh"].shape[1]
 
         loads = np.zeros((ny, 6))
         loads[0, 2] = 1e4
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("loads", val=loads, units="N")
-        indep_var_comp.add_output("load_factor", val=1.0)
 
         struct_group = SpatialBeamAlone(surface=surf_dict)
 
-        # Add indep_vars to the structural group
-        struct_group.add_subsystem("indep_vars", indep_var_comp, promotes=["*"])
-
-        prob.model.add_subsystem(surf_dict["name"], struct_group)
-
-        prob.driver = om.ScipyOptimizeDriver()
-        prob.driver.options["disp"] = True
+        subsystems[surf_dict["name"]] = struct_group
 
         # Setup problem and add design variables, constraint, and objective
-        prob.model.add_design_var("wing.thickness_cp", lower=0.01, upper=0.5, scaler=1e2)
-        prob.model.add_constraint("wing.failure", upper=0.0)
-        prob.model.add_constraint("wing.thickness_intersects", upper=0.0)
 
         # Add design variables, constraisnt, and objective on the problem
-        prob.model.add_objective("wing.structural_mass", scaler=1e-5)
 
         # Set up the problem
-        prob.setup()
+        prob = om.Problem(model=om.Group(subsystems=subsystems, connections=connections))
+        prob.set_val(surf_dict["name"] + ".loads", loads, units="N")
 
         prob.run_model()
 
-        assert_near_equal(prob["wing.structural_mass"][0], 100.727314456, 1e-4)
-        assert_near_equal(prob["wing.disp"][0, 2], 0.696503988153, 1e-6)
-        np.testing.assert_allclose(prob["wing.disp"][1, :], np.array([-0.0, 0.0, 0.39925232, -0.19102602, 0.0, 0.0]))
+        assert_near_equal(prob.get_val("wing.structural_mass")[0], 100.727314456, 1e-4)
+        assert_near_equal(prob.get_val("wing.disp")[0, 2], 0.696503988153, 1e-6)
+        np.testing.assert_allclose(
+            prob.get_val("wing.disp")[1, :], np.array([-0.0, 0.0, 0.39925232, -0.19102602, 0.0, 0.0])
+        )
 
 
 if __name__ == "__main__":

@@ -1,7 +1,13 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
 from openaerostruct.structures.utils import norm
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class WingboxGeometry(om.ExplicitComponent):
@@ -23,23 +29,27 @@ class WingboxGeometry(om.ExplicitComponent):
         Twist angles in planes normal to the FEM elements.
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        self.surface = self.options["surface"]
-        mesh = self.surface["mesh"]
-        nx, ny = mesh.shape[0], mesh.shape[1]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        nx, ny = f.surface["mesh"].shape[:2]
+        d = VarDecl()
 
-        self.add_input("mesh", val=np.zeros((nx, ny, 3)), units="m")
+        d.add_input("mesh", val=np.zeros((nx, ny, 3)), units="m")
 
-        self.add_output("streamwise_chords", val=np.ones((ny - 1)), units="m")
-        self.add_output("fem_chords", val=np.ones((ny - 1)), units="m")
-        self.add_output("fem_twists", val=np.ones((ny - 1)), units="deg")
+        d.add_output("streamwise_chords", val=np.ones((ny - 1)), units="m")
+        d.add_output("fem_chords", val=np.ones((ny - 1)), units="m")
+        d.add_output("fem_twists", val=np.ones((ny - 1)), units="deg")
 
-        self.declare_partials("*", "*", method="fd")
+        d.declare_partials("*", "*")
+        return d.into(data)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         mesh = inputs["mesh"]
         vectors = mesh[-1, :, :] - mesh[0, :, :]
         streamwise_chords = np.sqrt(np.sum(vectors**2, axis=1))
@@ -48,7 +58,7 @@ class WingboxGeometry(om.ExplicitComponent):
         # Chord lengths for the panel strips at the panel midpoint
         outputs["streamwise_chords"] = streamwise_chords.copy()
 
-        fem_twists = np.zeros(streamwise_chords.shape, dtype=type(mesh[0, 0, 0]))
+        fem_twists = np.zeros(streamwise_chords.shape, dtype=mesh.dtype)
         fem_chords = streamwise_chords.copy()
 
         surface = self.surface

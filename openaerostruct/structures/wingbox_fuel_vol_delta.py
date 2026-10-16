@@ -1,10 +1,15 @@
+from typing import Any
+
 import numpy as np
+from pydantic import model_validator
 
-import openmdao.api as om
+import om4.api as om
+from om4.derivatives.complex_step import ComplexStep
+from om4.derivatives.differentiator import Differentiator
+from om4.utils.polymorphic import Polymorphic
 
-
-def norm(vec):
-    return np.sqrt(np.sum(vec**2))
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class WingboxFuelVolDelta(om.ExplicitComponent):
@@ -25,31 +30,35 @@ class WingboxFuelVolDelta(om.ExplicitComponent):
         If the value is negative, then there isn't enough volume for the fuel.
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
+    differentiator: Polymorphic[Differentiator] | None = ComplexStep()
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        ny = f.surface["mesh"].shape[1]
+        d = VarDecl()
 
-        self.ny = surface["mesh"].shape[1]
+        d.add_input("fuelburn", val=0.0, units="kg")
+        d.add_input("fuel_vols", val=np.zeros((ny - 1)), units="m**3")
+        d.add_output("fuel_vol_delta", val=0.0, units="m**3")
 
-        self.add_input("fuelburn", val=0.0, units="kg")
-        self.add_input("fuel_vols", val=np.zeros((self.ny - 1)), units="m**3")
-        self.add_output("fuel_vol_delta", val=0.0, units="m**3")
+        d.declare_partials("*", "*")
+        return d.into(data)
 
-        self.declare_partials("*", "*", method="cs")
-
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         fuel_weight = inputs["fuelburn"]
         reserves = self.surface["Wf_reserve"]
         fuel_density = self.surface["fuel_density"]
-        vols = inputs["fuel_vols"]
 
         if self.surface["symmetry"] is True:
-            fuel_weight /= 2.0
-            reserves /= 2.0
+            fuel_weight = fuel_weight / 2.0
+            reserves = reserves / 2.0
 
-        sum_vols = np.sum(vols)
+        sum_vols = np.sum(inputs["fuel_vols"])
 
         # This is used for the fuel-volume constraint. It should be positive for fuel to fit.
         outputs["fuel_vol_delta"] = sum_vols - (fuel_weight + reserves) / fuel_density

@@ -58,7 +58,12 @@ def port(path):
         )
 
     # pass 1: indep vars, point-name -> var, flow promotes
-    indep = []  # (name, val_src, units_src)
+    funcs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+
+    def func_of(node):
+        return next((f.name for f in funcs if f.lineno <= node.lineno <= f.end_lineno), None)
+
+    indep = []  # (name, val_src, units_src, enclosing function)
     indep_names = set()
     var_of_name = {}  # source of subsystem name expr -> var name
     for st in stmts:
@@ -72,7 +77,7 @@ def port(path):
             call = st.value
             name = call.args[0].value
             kw = {k.arg: seg(k.value)[0] for k in call.keywords}
-            indep.append((name, kw["val"], kw.get("units")))
+            indep.append((name, kw["val"], kw.get("units"), func_of(st)))
             indep_names.add(name)
         if (
             is_model_call(st, "add_subsystem")
@@ -82,6 +87,28 @@ def port(path):
             nm = seg(st.value.args[0])[0]
             if isinstance(st.value.args[1], ast.Name):
                 var_of_name[nm] = st.value.args[1].id
+    # Struct-alone template: indeps are added inside the structural group, which the model adds
+    # with ``promotes=[...]``.
+    struct_template = False
+    ctor_extra = {}  # group variable -> constructor kwargs source
+    group_name_expr = {}  # group variable -> source of its subsystem name
+    for st in stmts:
+        if (
+            isinstance(st, ast.Expr)
+            and isinstance(st.value, ast.Call)
+            and ast.unparse(st.value.func).endswith(".add_subsystem")
+            and not is_model_call(st, "add_subsystem")
+            and st.value.args
+            and isinstance(st.value.args[0], ast.Constant)
+            and st.value.args[0].value == "indep_vars"
+        ):
+            struct_template = True
+        if is_model_call(st, "add_subsystem") and len(st.value.args) >= 2 and isinstance(st.value.args[1], ast.Name):
+            var = st.value.args[1].id
+            group_name_expr[var] = seg(st.value.args[0])[0]
+            for k in st.value.keywords:
+                if k.arg == "promotes":
+                    ctor_extra[var] = ", promotes_inputs=" + seg(k.value)[0] + ", promotes_outputs=" + seg(k.value)[0]
     opt_opts = {}  # ScipyOptimizeDriver option -> source
     opt_blocks = {"design_vars": [], "constraints": [], "objectives": []}
     tot_args = {}
@@ -174,6 +201,10 @@ def port(path):
                 new = call_src[:-1] + ", promotes_inputs=" + repr(promote_of_var[tgt.id]).replace("'", '"') + ")"
                 edits.append((ca, cb, new))
                 continue
+            if isinstance(tgt, ast.Name) and tgt.id in ctor_extra:
+                call_src, ca, cb = seg(st.value)
+                edits.append((ca, cb, call_src[:-1] + ctor_extra[tgt.id] + ")"))
+                continue
             if isinstance(tgt, ast.Name) and tgt.id == "prob" and ast.unparse(st.value) == "om.Problem()":
                 edits.append((a, b, "subsystems = {}\n" + indent + "connections = []"))
                 continue
@@ -199,12 +230,14 @@ def port(path):
             f = ast.unparse(c.func)
             if f == "indep_var_comp.add_output":
                 edits.append((a, b, "pass  # DELETE"))
+            elif struct_template and f.endswith(".add_subsystem") and not is_model_call(st, "add_subsystem"):
+                edits.append((a, b, "pass  # DELETE"))
             elif is_model_call(st, "add_subsystem"):
                 if len(c.args) >= 2 and isinstance(c.args[0], ast.Constant) and c.args[0].value == "prob_vars":
                     edits.append((a, b, "pass  # DELETE"))
                 else:
                     kw = {k.arg for k in c.keywords}
-                    if kw - {"promotes_inputs", "promotes_outputs"}:
+                    if kw - {"promotes_inputs", "promotes_outputs", "promotes"}:
                         return f"needs hand port (add_subsystem kwargs {kw})"
                     if c.args and len(c.args) == 2 and isinstance(c.args[1], ast.Name):
                         edits.append((a, b, f"subsystems[{seg(c.args[0])[0]}] = {c.args[1].id}"))
@@ -229,9 +262,22 @@ def port(path):
                 lines_ = [
                     f"prob = om.Problem(model=om.Group(subsystems=subsystems, connections=connections{gkw}))",
                 ]
-                for name, val, units in indep:
+                fsrc = ast.get_source_segment(text, next(f for f in funcs if f.name == func_of(st)))
+                # Without weight relief, fuel or point masses nothing consumes the load factor
+                unused_lf = struct_template and not any(
+                    k in fsrc
+                    for k in ('"struct_weight_relief": True', '"distributed_fuel_weight": True', "n_point_masses")
+                )
+                for name, val, units, fn in indep:
+                    if fn != func_of(st) or (name == "load_factor" and unused_lf):
+                        continue
                     u = f", units={units}" if units else ""
-                    lines_.append(f'prob.set_val("{name}", {val}{u})')
+                    target = f'"{name}"'
+                    if struct_template:
+                        (gvar,) = [v for v in group_name_expr if v == "struct_group"]
+                        if gvar not in ctor_extra:
+                            target = f'{group_name_expr[gvar]} + ".{name}"'
+                    lines_.append(f"prob.set_val({target}, {val}{u})")
                 edits.append((a, b, ("\n" + indent).join(lines_)))
             elif f == "prob.run_driver" and not use_opt:
                 edits.append((a, b, "prob.run_model()"))

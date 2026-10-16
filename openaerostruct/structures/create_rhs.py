@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class CreateRHS(om.ExplicitComponent):
@@ -22,28 +28,34 @@ class CreateRHS(om.ExplicitComponent):
         analysis or the user-defined loads.
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        ny = f.surface["mesh"].shape[1]
+        d = VarDecl()
 
-        self.ny = surface["mesh"].shape[1]
+        d.add_input("total_loads", val=np.zeros((ny, 6)), units="N")
+        d.add_output("forces", val=np.ones(((ny + 1) * 6)), units="N")
 
-        self.add_input("total_loads", val=np.zeros((self.ny, 6)), units="N")
-        self.add_output("forces", val=np.ones(((self.ny + 1) * 6)), units="N")
-
-        n = self.ny * 6
+        n = ny * 6
         arange = np.arange((n))
-        self.declare_partials("forces", "total_loads", val=1.0, rows=arange, cols=arange)
+        d.declare_partials("forces", "total_loads", val=1.0, rows=arange, cols=arange)
+        return d.into(data)
 
-    def compute(self, inputs, outputs):
-        outputs["forces"][:] = 0.0
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        ny = self.surface["mesh"].shape[1]
+        forces = np.zeros((ny + 1) * 6, dtype=inputs["total_loads"].dtype)
 
         # Populate the right-hand side of the linear system using the
         # prescribed or computed loads
-        outputs["forces"][: 6 * self.ny] += inputs["total_loads"].reshape(self.ny * 6)
+        forces[: 6 * ny] += inputs["total_loads"].reshape(ny * 6)
 
         # Remove extremely small values from the RHS so the linear system
         # can more easily be solved
-        outputs["forces"][np.abs(outputs["forces"]) < 1e-6] = 0.0
+        forces[np.abs(forces) < 1e-6] = 0.0
+        outputs["forces"] = forces

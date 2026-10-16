@@ -1,6 +1,15 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+from om4.derivatives.complex_step import ComplexStep
+from om4.derivatives.differentiator import Differentiator
+from om4.utils.polymorphic import Polymorphic
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class ComputeThrustLoads(om.ExplicitComponent):
@@ -28,31 +37,40 @@ class ComputeThrustLoads(om.ExplicitComponent):
         This is cumulative and includes the forces and moments from all point masses.
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
+    differentiator: Polymorphic[Differentiator] | None = ComplexStep()
+    check_partials_options: om.CheckPartialsOptions | None = om.CheckPartialsOptions(differentiator="fd")
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
-        self.ny = surface["mesh"].shape[1]
-        self.n_point_masses = surface["n_point_masses"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        surface = f.surface
+        ny = surface["mesh"].shape[1]
+        n_point_masses = surface["n_point_masses"]
+        d = VarDecl()
 
-        self.add_input("point_mass_locations", val=np.zeros((self.n_point_masses, 3)), units="m")
-        self.add_input("engine_thrusts", val=np.zeros((self.n_point_masses)), units="N")
-        self.add_input("nodes", val=np.zeros((self.ny, 3)), units="m")
+        d.add_input("point_mass_locations", val=np.zeros((n_point_masses, 3)), units="m")
+        d.add_input("engine_thrusts", val=np.zeros((n_point_masses)), units="N")
+        d.add_input("nodes", val=np.zeros((ny, 3)), units="m")
 
-        self.add_output("nodal_weightings", val=np.zeros((self.n_point_masses, self.ny)))
-        self.add_output(
-            "loads_from_thrusts", val=np.zeros((self.ny, 6)), units="N"
+        d.add_output("nodal_weightings", val=np.zeros((n_point_masses, ny)))
+        d.add_output(
+            "loads_from_thrusts", val=np.zeros((ny, 6)), units="N"
         )  # WARNING!!! UNITS ARE A MIXTURE OF N & N*m
 
-        self.set_check_partial_options(wrt="*", method="fd")
-        self.declare_partials("*", "*", method="cs")
+        d.declare_partials("*", "*")
+        return d.into(data)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         nodes = inputs["nodes"]
-        nodal_weightings = outputs["nodal_weightings"]
-        loads_from_engine_thrusts = outputs["loads_from_thrusts"]
-        loads_from_engine_thrusts[:] = 0.0
+        ny = nodes.shape[0]
+        n_point_masses = self.surface["n_point_masses"]
+        dtype = np.result_type(nodes, inputs["point_mass_locations"], inputs["engine_thrusts"])
+        nodal_weightings = np.zeros((n_point_masses, ny), dtype=dtype)
+        loads_from_engine_thrusts = np.zeros((ny, 6), dtype=dtype)
 
         # Loop through each point mass location, incrementing idx
         for idx, point_mass_location in enumerate(inputs["point_mass_locations"]):
@@ -87,3 +105,6 @@ class ComputeThrustLoads(om.ExplicitComponent):
 
             # Accumulate the moments to the load array
             loads_from_engine_thrusts[:, 3:] += moments
+
+        outputs["nodal_weightings"] = nodal_weightings
+        outputs["loads_from_thrusts"] = loads_from_engine_thrusts

@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 from openaerostruct.structures.utils import norm
 
 
@@ -23,24 +29,28 @@ class Weight(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
+    check_partials_options: om.CheckPartialsOptions | None = om.CheckPartialsOptions(differentiator="cs")
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        ny = f.surface["mesh"].shape[1]
+        d = VarDecl()
 
-        self.ny = ny = surface["mesh"].shape[1]
+        d.add_input("A", val=np.ones((ny - 1)), units="m**2")
+        d.add_input("nodes", val=np.zeros((ny, 3)), units="m")
 
-        self.add_input("A", val=np.ones((self.ny - 1)), units="m**2")
-        self.add_input("nodes", val=np.zeros((self.ny, 3)), units="m")
+        d.add_output("structural_mass", val=0.0, units="kg")
+        d.add_output("element_mass", val=np.zeros((ny - 1)), units="kg")
 
-        self.add_output("structural_mass", val=0.0, units="kg")
-        self.add_output("element_mass", val=np.zeros((self.ny - 1)), units="kg")
+        d.declare_partials("structural_mass", ["A", "nodes"])
 
-        self.declare_partials("structural_mass", ["A", "nodes"])
-
-        row_col = np.arange(self.ny - 1, dtype=int)
-        self.declare_partials("element_mass", "A", rows=row_col, cols=row_col)
+        row_col = np.arange(ny - 1, dtype=int)
+        d.declare_partials("element_mass", "A", rows=row_col, cols=row_col)
 
         dimensions = 3
         rows = np.empty((dimensions * 2 * (ny - 1)))
@@ -50,11 +60,10 @@ class Weight(om.ExplicitComponent):
             cols[i * dimensions * 2 : (i + 1) * dimensions * 2] = np.linspace(
                 i * dimensions, i * dimensions + (dimensions * 2 - 1), dimensions * 2
             )
-        self.declare_partials("element_mass", "nodes", rows=rows, cols=cols)
+        d.declare_partials("element_mass", "nodes", rows=rows, cols=cols)
+        return d.into(data)
 
-        self.set_check_partial_options("*", method="cs", step=1e-40)
-
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         A = inputs["A"]
         nodes = inputs["nodes"]
         mrho = self.surface["mrho"]
@@ -79,7 +88,7 @@ class Weight(om.ExplicitComponent):
         nodes = inputs["nodes"]
         mrho = self.surface["mrho"]
         wwr = self.surface["wing_weight_ratio"]
-        ny = self.ny
+        ny = nodes.shape[0]
 
         # Calculate the volume and weight of the structure
         const0 = nodes[1:, :] - nodes[:-1, :]
@@ -124,9 +133,9 @@ class Weight(om.ExplicitComponent):
         d__dprecalc = 0.5 * precalc ** (-0.5)
 
         dimensions = 3
+        dem_dnodes = np.zeros(dimensions * 2 * (ny - 1))
         for i in range(ny - 1):
             first_part = const0[i, :] * d__dprecalc[i] * 2 * (-1) * A[i] * const2
             second_part = const0[i, :] * d__dprecalc[i] * 2 * A[i] * const2
-            partials["element_mass", "nodes"][i * dimensions * 2 : (i + 1) * dimensions * 2] = np.append(
-                first_part, second_part
-            )
+            dem_dnodes[i * dimensions * 2 : (i + 1) * dimensions * 2] = np.append(first_part, second_part)
+        partials["element_mass", "nodes"] = dem_dnodes

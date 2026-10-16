@@ -18,3 +18,4 @@ fwd/rev total derivatives for groups. Run from the repo root in the pixi env, fo
 | `xc_common_func.py` | `AtmosComp`, `ReynoldsComp`, `BreguetRange`, `CenterOfGravity`, `Equilibrium` |
 | `xc_totalperf.py` | `TotalPerformance` group (values, fwd/rev totals; all option combinations) |
 | `xc_geom_misc.py` | `RadiusComp`, `MonotonicConstraint`, `GeomMultiUnification`, `GeomMultiJoin` (OM3 `t_over_c` sizing bug excluded) |
+| `xc_transfer.py` | `ComputeTransformationMatrix`, `DisplacementTransfer`, `LoadTransfer` (values and dense partials) |

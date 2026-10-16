@@ -1,6 +1,12 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class Disp(om.ExplicitComponent):
@@ -26,22 +32,26 @@ class Disp(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        ny = f.surface["mesh"].shape[1]
+        d = VarDecl()
 
-        self.ny = surface["mesh"].shape[1]
+        d.add_input("disp_aug", val=np.zeros(((ny + 1) * 6)), units="m")
+        d.add_output("disp", val=np.zeros((ny, 6)), units="m")
 
-        self.add_input("disp_aug", val=np.zeros(((self.ny + 1) * 6)), units="m")
-        self.add_output("disp", val=np.zeros((self.ny, 6)), units="m")
-
-        n = self.ny * 6
+        n = ny * 6
         arange = np.arange((n))
-        self.declare_partials("disp", "disp_aug", val=1.0, rows=arange, cols=arange)
+        d.declare_partials("disp", "disp_aug", val=1.0, rows=arange, cols=arange)
+        return d.into(data)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         # Obtain the relevant portions of disp_aug and store the reshaped
         # displacements in disp
         outputs["disp"] = inputs["disp_aug"][:-6].reshape((-1, 6))

@@ -168,3 +168,38 @@ def compute_composite_stiffness(surface):
     surface["G"] = G_eff
 
     # no need to return anything as the values are updated in the surface dictionary (call by reference)
+
+
+def failure_criteria(surface):
+    """
+    Get the failure-criteria setup shared by the failure components.
+
+    Parameters
+    ----------
+    surface : Surface
+        OpenAeroStruct surface.
+
+    Returns
+    -------
+    use_composite : bool
+        True if the surface uses the composite wingbox (Tsai-Wu strength ratios).
+    num_failure_criteria : int
+        Number of failure criteria per FEM element.
+    stress_limit : float
+        Stress (or strength ratio, for composites) at which an element is considered failed.
+    """
+    use_composite = bool(surface.get("useComposite", False))
+    safety_factor = surface["safety_factor"] if "safety_factor" in surface else 1
+
+    if surface["fem_model_type"].lower() == "tube":
+        num_failure_criteria = 2
+    elif use_composite:
+        num_failure_criteria = 4 * len(surface["ply_angles"])
+    else:
+        num_failure_criteria = 4
+
+    if use_composite:
+        stress_limit = 1 / safety_factor
+    else:
+        stress_limit = surface["yield"] / safety_factor
+    return use_composite, num_failure_criteria, stress_limit

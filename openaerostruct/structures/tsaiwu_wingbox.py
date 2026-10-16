@@ -1,8 +1,16 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+from om4.derivatives.complex_step import ComplexStep
+from om4.derivatives.differentiator import Differentiator
+from om4.utils.polymorphic import Polymorphic
 
 from openaerostruct.structures.utils import norm, unit, compute_lamina_transformation_matrix
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class TsaiWuWingbox(om.ExplicitComponent):
@@ -45,54 +53,44 @@ class TsaiWuWingbox(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
+    differentiator: Polymorphic[Differentiator] | None = ComplexStep()
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
-        self.ply_angles = surface["ply_angles"]
-        self.num_plies = len(self.ply_angles)
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        surface = f.surface
+        num_plies = len(surface["ply_angles"])
+        ny = surface["mesh"].shape[1]
+        d = VarDecl()
 
-        self.ny = surface["mesh"].shape[1]
-
-        self.add_input("nodes", val=np.zeros((self.ny, 3)), units="m")
-        self.add_input("disp", val=np.zeros((self.ny, 6)), units="m")
-        self.add_input("Qz", val=np.zeros((self.ny - 1)), units="m**3")
-        self.add_input("J", val=np.zeros((self.ny - 1)), units="m**4")
-        self.add_input("A_enc", val=np.zeros((self.ny - 1)), units="m**2")
-        self.add_input("spar_thickness", val=np.zeros((self.ny - 1)), units="m")
-        self.add_input("htop", val=np.zeros((self.ny - 1)), units="m")
-        self.add_input("hbottom", val=np.zeros((self.ny - 1)), units="m")
-        self.add_input("hfront", val=np.zeros((self.ny - 1)), units="m")
-        self.add_input("hrear", val=np.zeros((self.ny - 1)), units="m")
-        self.add_output("tsaiwu_sr", val=np.zeros((self.ny - 1, self.num_plies * 4)))
-
-        self.E = surface["E"]
-        self.G = surface["G"]
-
-        self.E1 = surface["E1"]
-        self.E2 = surface["E2"]
-        self.G12 = surface["G12"]
-        self.nu12 = surface["nu12"]
-        self.nu21 = self.nu12 * self.E2 / self.E1
-
-        self.sigma_c1 = surface["sigma_c1"]
-        self.sigma_t1 = surface["sigma_t1"]
-        self.sigma_c2 = surface["sigma_c2"]
-        self.sigma_t2 = surface["sigma_t2"]
-        self.sigma_12max = surface["sigma_12max"]
+        d.add_input("nodes", val=np.zeros((ny, 3)), units="m")
+        d.add_input("disp", val=np.zeros((ny, 6)), units="m")
+        d.add_input("Qz", val=np.zeros((ny - 1)), units="m**3")
+        d.add_input("J", val=np.zeros((ny - 1)), units="m**4")
+        d.add_input("A_enc", val=np.zeros((ny - 1)), units="m**2")
+        d.add_input("spar_thickness", val=np.zeros((ny - 1)), units="m")
+        d.add_input("htop", val=np.zeros((ny - 1)), units="m")
+        d.add_input("hbottom", val=np.zeros((ny - 1)), units="m")
+        d.add_input("hfront", val=np.zeros((ny - 1)), units="m")
+        d.add_input("hrear", val=np.zeros((ny - 1)), units="m")
+        d.add_output("tsaiwu_sr", val=np.zeros((ny - 1, num_plies * 4)))
 
         # sanity check: all strength values should be positive
-        if self.sigma_c1 <= 0:
+        if surface["sigma_c1"] <= 0:
             raise ValueError("Composite material strength: sigma_c1 must be positive")
-        if self.sigma_c2 <= 0:
+        if surface["sigma_c2"] <= 0:
             raise ValueError("Composite material strength: sigma_c2 must be positive")
-        if self.sigma_12max <= 0:
+        if surface["sigma_12max"] <= 0:
             raise ValueError("Composite material strength: sigma_12max must be positive")
 
-        self.declare_partials("*", "*", method="cs")
+        d.declare_partials("*", "*")
+        return d.into(data)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         disp = inputs["disp"]
         nodes = inputs["nodes"]
         A_enc = inputs["A_enc"]
@@ -103,22 +101,35 @@ class TsaiWuWingbox(om.ExplicitComponent):
         hfront = inputs["hfront"]
         hrear = inputs["hrear"]
         spar_thickness = inputs["spar_thickness"]
-        tsaiwu_sr = outputs["tsaiwu_sr"]
 
-        # Only use complex type for these arrays if we're using cs to check derivs
-        dtype = type(disp[0, 0])
+        surface = self.surface
+        E1 = surface["E1"]
+        E2 = surface["E2"]
+        G12 = surface["G12"]
+        nu12 = surface["nu12"]
+        nu21 = nu12 * E2 / E1
+        sigma_c1 = surface["sigma_c1"]
+        sigma_t1 = surface["sigma_t1"]
+        sigma_c2 = surface["sigma_c2"]
+        sigma_t2 = surface["sigma_t2"]
+        sigma_12max = surface["sigma_12max"]
+        ply_angles = surface["ply_angles"]
+        num_plies = len(ply_angles)
+
+        dtype = np.result_type(disp, nodes, A_enc, Qy, J, htop, hbottom, hfront, hrear, spar_thickness)
+        tsaiwu_sr = np.zeros((nodes.shape[0] - 1, num_plies * 4), dtype=dtype)
         T = np.zeros((3, 3), dtype=dtype)
         x_gl = np.array([1, 0, 0], dtype=dtype)
 
         # Define ply stiffness matrix, will use this later to compute ply stress from strain
         Q = np.zeros((3, 3))
-        Q[0, 0] = self.E1 / (1 - self.nu12 * self.nu21)
-        Q[0, 1] = self.nu12 * self.E2 / (1 - self.nu12 * self.nu21)
+        Q[0, 0] = E1 / (1 - nu12 * nu21)
+        Q[0, 1] = nu12 * E2 / (1 - nu12 * nu21)
         Q[1, 0] = Q[0, 1]
-        Q[1, 1] = self.E2 / (1 - self.nu12 * self.nu21)
-        Q[2, 2] = self.G12
+        Q[1, 1] = E2 / (1 - nu12 * nu21)
+        Q[2, 2] = G12
 
-        num_elems = self.ny - 1
+        num_elems = nodes.shape[0] - 1
         for ielem in range(num_elems):
             P0 = nodes[ielem, :]
             P1 = nodes[ielem + 1, :]
@@ -192,10 +203,6 @@ class TsaiWuWingbox(om.ExplicitComponent):
             epsilon_elem[3, 1] = 0
             epsilon_elem[3, 2] = torsion_shear_strain + vertical_shear_strain
 
-            # Define the array for ply-orientation angles:
-            ply_angles = self.ply_angles
-            num_plies = len(ply_angles)
-
             # Convert strain from the laminate frame to ply local frame for each ply
             epsilon_elem_ply = np.zeros((4, num_plies, 3), dtype=dtype)
             sigma_elem_ply = np.zeros((4, num_plies, 3), dtype=dtype)
@@ -217,11 +224,11 @@ class TsaiWuWingbox(om.ExplicitComponent):
                     sigma_elem_ply[point_num, ply_num, :] = Q @ epsilon_elem_ply[point_num, ply_num, :]
 
             # Define the constants for the Tsai-Wu Strength Ratios
-            F1 = 1 / self.sigma_t1 - 1 / self.sigma_c1
-            F11 = 1 / (self.sigma_t1 * self.sigma_c1)
-            F2 = 1 / self.sigma_t2 - 1 / self.sigma_c2
-            F22 = 1 / (self.sigma_t2 * self.sigma_c2)
-            F66 = 1 / (self.sigma_12max**2)
+            F1 = 1 / sigma_t1 - 1 / sigma_c1
+            F11 = 1 / (sigma_t1 * sigma_c1)
+            F2 = 1 / sigma_t2 - 1 / sigma_c2
+            F22 = 1 / (sigma_t2 * sigma_c2)
+            F66 = 1 / (sigma_12max**2)
 
             # Find the Tsai-Wu Strength Ratios for each ply in each element and storing them in the tsaiwu_sr array
             for point_num in range(4):
@@ -233,3 +240,5 @@ class TsaiWuWingbox(om.ExplicitComponent):
                         + F66 * sigma_elem_ply[point_num, ply_num, 2] ** 2
                     )
                     tsaiwu_sr[ielem, point_num * num_plies + ply_num] = 0.5 * (a + np.sqrt(a**2 + 4 * b))
+
+        outputs["tsaiwu_sr"] = tsaiwu_sr

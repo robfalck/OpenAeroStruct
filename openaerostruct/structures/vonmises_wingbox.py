@@ -1,8 +1,16 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+from om4.derivatives.complex_step import ComplexStep
+from om4.derivatives.differentiator import Differentiator
+from om4.utils.polymorphic import Polymorphic
 
 from openaerostruct.structures.utils import norm, unit
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class VonMisesWingbox(om.ExplicitComponent):
@@ -45,35 +53,35 @@ class VonMisesWingbox(om.ExplicitComponent):
 
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
+    differentiator: Polymorphic[Differentiator] | None = ComplexStep()
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        ny = f.surface["mesh"].shape[1]
+        d = VarDecl()
 
-        self.ny = surface["mesh"].shape[1]
+        d.add_input("nodes", val=np.zeros((ny, 3)), units="m")
+        d.add_input("disp", val=np.zeros((ny, 6)), units="m")
+        d.add_input("Qz", val=np.zeros((ny - 1)), units="m**3")
+        d.add_input("J", val=np.zeros((ny - 1)), units="m**4")
+        d.add_input("A_enc", val=np.zeros((ny - 1)), units="m**2")
+        d.add_input("spar_thickness", val=np.zeros((ny - 1)), units="m")
+        d.add_input("htop", val=np.zeros((ny - 1)), units="m")
+        d.add_input("hbottom", val=np.zeros((ny - 1)), units="m")
+        d.add_input("hfront", val=np.zeros((ny - 1)), units="m")
+        d.add_input("hrear", val=np.zeros((ny - 1)), units="m")
 
-        self.add_input("nodes", val=np.zeros((self.ny, 3)), units="m")
-        self.add_input("disp", val=np.zeros((self.ny, 6)), units="m")
-        self.add_input("Qz", val=np.zeros((self.ny - 1)), units="m**3")
-        self.add_input("J", val=np.zeros((self.ny - 1)), units="m**4")
-        self.add_input("A_enc", val=np.zeros((self.ny - 1)), units="m**2")
-        self.add_input("spar_thickness", val=np.zeros((self.ny - 1)), units="m")
-        self.add_input("htop", val=np.zeros((self.ny - 1)), units="m")
-        self.add_input("hbottom", val=np.zeros((self.ny - 1)), units="m")
-        self.add_input("hfront", val=np.zeros((self.ny - 1)), units="m")
-        self.add_input("hrear", val=np.zeros((self.ny - 1)), units="m")
+        d.add_output("vonmises", val=np.zeros((ny - 1, 4)), units="N/m**2")
 
-        self.add_output("vonmises", val=np.zeros((self.ny - 1, 4)), units="N/m**2")
+        d.declare_partials("*", "*")
+        return d.into(data)
 
-        self.E = surface["E"]
-        self.G = surface["G"]
-
-        self.tssf = surface["strength_factor_for_upper_skin"]
-
-        self.declare_partials("*", "*", method="cs")
-
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         disp = inputs["disp"]
         nodes = inputs["nodes"]
         A_enc = inputs["A_enc"]
@@ -84,17 +92,17 @@ class VonMisesWingbox(om.ExplicitComponent):
         hfront = inputs["hfront"]
         hrear = inputs["hrear"]
         spar_thickness = inputs["spar_thickness"]
-        vonmises = outputs["vonmises"]
 
-        # Only use complex type for these arrays if we're using cs to check derivs
-        dtype = type(disp[0, 0])
+        dtype = np.result_type(disp, nodes, A_enc, Qy, J, htop, hbottom, hfront, hrear, spar_thickness)
         T = np.zeros((3, 3), dtype=dtype)
         x_gl = np.array([1, 0, 0], dtype=dtype)
+        vonmises = np.zeros((nodes.shape[0] - 1, 4), dtype=dtype)
 
-        E = self.E
-        G = self.G
+        E = self.surface["E"]
+        G = self.surface["G"]
+        tssf = self.surface["strength_factor_for_upper_skin"]
 
-        num_elems = self.ny - 1
+        num_elems = nodes.shape[0] - 1
         for ielem in range(num_elems):
             P0 = nodes[ielem, :]
             P1 = nodes[ielem + 1, :]
@@ -140,19 +148,9 @@ class VonMisesWingbox(om.ExplicitComponent):
                 / (2 * spar_thickness[ielem])
             )
 
-            # print("==========",ielem,"================")
-            # print("vertical_shear", vertical_shear)
-            # print("top",top_bending_stress)
-            # print("bottom",bottom_bending_stress)
-            # print("front",front_bending_stress)
-            # print("rear",rear_bending_stress)
-            # print("axial", axial_stress)
-            # print("torsion", torsion_stress)
-
             # The 4 stress combinations:
             vonmises[ielem, 0] = (
-                np.sqrt((top_bending_stress + rear_bending_stress + axial_stress) ** 2 + 3 * torsion_stress**2)
-                / self.tssf
+                np.sqrt((top_bending_stress + rear_bending_stress + axial_stress) ** 2 + 3 * torsion_stress**2) / tssf
             )
             vonmises[ielem, 1] = np.sqrt(
                 (bottom_bending_stress + front_bending_stress + axial_stress) ** 2 + 3 * torsion_stress**2
@@ -161,6 +159,7 @@ class VonMisesWingbox(om.ExplicitComponent):
                 (front_bending_stress + axial_stress) ** 2 + 3 * (torsion_stress - vertical_shear) ** 2
             )
             vonmises[ielem, 3] = (
-                np.sqrt((rear_bending_stress + axial_stress) ** 2 + 3 * (torsion_stress + vertical_shear) ** 2)
-                / self.tssf
+                np.sqrt((rear_bending_stress + axial_stress) ** 2 + 3 * (torsion_stress + vertical_shear) ** 2) / tssf
             )
+
+        outputs["vonmises"] = vonmises

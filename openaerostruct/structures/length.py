@@ -1,21 +1,30 @@
+from typing import Any
+
 import numpy as np
+from pydantic import model_validator
 
-import openmdao.api as om
+import om4.api as om
 
+from openaerostruct.structures.utils import norm
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 from openaerostruct.utils.vector_algebra import compute_norm
 
 
 class Length(om.ExplicitComponent):
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
 
-    def setup(self):
-        surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        ny = f.surface["mesh"].shape[1]
+        d = VarDecl()
 
-        self.ny = ny = surface["mesh"].shape[1]
-
-        self.add_input("nodes", shape=(ny, 3), units="m")
-        self.add_output("element_lengths", shape=ny - 1, units="m")
+        d.add_input("nodes", shape=(ny, 3), units="m")
+        d.add_output("element_lengths", shape=ny - 1, units="m")
 
         mesh_indices = np.arange(3 * ny).reshape((ny, 3))
         length_indices = np.arange(ny - 1)
@@ -27,19 +36,18 @@ class Length(om.ExplicitComponent):
                 mesh_indices[1:, :].flatten(),
             ]
         )
-        self.declare_partials("element_lengths", "nodes", rows=rows, cols=cols)
-        self.set_check_partial_options(wrt="nodes", method="fd", step=1e-6)
+        d.declare_partials("element_lengths", "nodes", rows=rows, cols=cols)
+        return d.into(data)
 
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
         vec = inputs["nodes"][1:, :] - inputs["nodes"][:-1, :]
 
-        outputs["element_lengths"] = np.linalg.norm(vec, axis=-1)
+        outputs["element_lengths"] = norm(vec, axis=-1)
 
     def compute_partials(self, inputs, partials):
-        ny = self.ny
-
         vec = inputs["nodes"][1:, :] - inputs["nodes"][:-1, :]
 
-        derivs = partials["element_lengths", "nodes"].reshape((2, ny - 1, 3))
+        derivs = np.empty((2, vec.shape[0], 3))
         derivs[0, :, :] = -vec / compute_norm(vec)
         derivs[1, :, :] = vec / compute_norm(vec)
+        partials["element_lengths", "nodes"] = derivs.flatten()

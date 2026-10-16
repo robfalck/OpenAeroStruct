@@ -2,7 +2,7 @@
 
 import unittest
 
-from openmdao.utils.assert_utils import assert_near_equal
+from om4.utils.assert_utils import assert_near_equal
 from openaerostruct.structures.utils import compute_composite_stiffness
 
 

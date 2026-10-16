@@ -1,11 +1,13 @@
-from openmdao.utils.assert_utils import assert_near_equal
+import om4.api as om
+from om4.variables.design_var import DesignVar
+from om4.variables.response import Constraint, Objective
+from om4.transforms.transform import AffineTransform
+from om4.utils.assert_utils import assert_near_equal
 import unittest
 import numpy as np
 
 from openaerostruct.meshing.mesh_generator import generate_mesh
 from openaerostruct.structures.struct_groups import SpatialBeamAlone
-
-import openmdao.api as om
 
 
 class Test(unittest.TestCase):
@@ -46,41 +48,44 @@ class Test(unittest.TestCase):
         }
 
         # Create the problem and assign the model group
-        prob = om.Problem()
+        subsystems = {}
+        connections = []
 
         ny = surf_dict["mesh"].shape[1]
 
         loads = np.zeros((ny, 6))
         loads[0, 2] = 1e4
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("loads", val=loads, units="N")
-        indep_var_comp.add_output("load_factor", val=1.0)
 
         struct_group = SpatialBeamAlone(surface=surf_dict)
 
-        # Add indep_vars to the structural group
-        struct_group.add_subsystem("indep_vars", indep_var_comp, promotes=["*"])
-
-        prob.model.add_subsystem(surf_dict["name"], struct_group)
-
-        prob.driver = om.ScipyOptimizeDriver()
-        prob.driver.options["disp"] = True
-        prob.driver.options["tol"] = 1e-9
+        subsystems[surf_dict["name"]] = struct_group
 
         # Setup problem and add design variables, constraint, and objective
-        prob.model.add_design_var("wing.thickness_cp", lower=0.001, upper=0.25, scaler=1e2)
-        prob.model.add_constraint("wing.failure", upper=0.0)
-        prob.model.add_constraint("wing.thickness_intersects", upper=0.0)
 
         # Add design variables, constraisnt, and objective on the problem
-        prob.model.add_objective("wing.structural_mass", scaler=1e-4)
 
         # Set up the problem
-        prob.setup()
+        prob = om.Problem(
+            model=om.Group(
+                subsystems=subsystems,
+                connections=connections,
+                design_vars={
+                    "wing.thickness_cp": DesignVar(
+                        lower=0.001, upper=0.25, transform=AffineTransform.from_scaler_adder(scaler=1e2)
+                    )
+                },
+                constraints={"wing.failure": Constraint(upper=0.0), "wing.thickness_intersects": Constraint(upper=0.0)},
+                objectives={
+                    "wing.structural_mass": Objective(transform=AffineTransform.from_scaler_adder(scaler=1e-4))
+                },
+                optimizer=om.ScipyMinimizeOptimizer(tol=1e-9, optimizer="SLSQP"),
+            )
+        )
+        prob.set_val(surf_dict["name"] + ".loads", loads, units="N")
 
-        prob.run_driver()
+        prob.run_optimizer()
 
-        assert_near_equal(prob["wing.structural_mass"][0], 116.702381059, 1e-4)
+        assert_near_equal(prob.get_val("wing.structural_mass")[0], 116.702381059, 1e-4)
 
 
 if __name__ == "__main__":

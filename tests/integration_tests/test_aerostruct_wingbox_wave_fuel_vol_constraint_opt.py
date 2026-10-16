@@ -71,7 +71,6 @@ upper_x = np.array(
         0.59,
         0.6,
     ],
-    dtype="complex128",
 )
 lower_x = np.array(
     [
@@ -127,7 +126,6 @@ lower_x = np.array(
         0.59,
         0.6,
     ],
-    dtype="complex128",
 )
 upper_y = np.array(
     [
@@ -183,7 +181,6 @@ upper_y = np.array(
         0.0547,
         0.0541,
     ],
-    dtype="complex128",
 )
 lower_y = np.array(
     [
@@ -239,7 +236,6 @@ lower_y = np.array(
         -0.0458,
         -0.0444,
     ],
-    dtype="complex128",
 )
 
 

@@ -1,7 +1,16 @@
-import numpy as np
+from typing import Any
 
-import openmdao.api as om
+import numpy as np
+from pydantic import model_validator
+
+import om4.api as om
+from om4.derivatives.differentiator import Differentiator
+from om4.derivatives.complex_step import ComplexStep
+from om4.utils.polymorphic import Polymorphic
+
 from openaerostruct.structures.utils import radii
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
 class SparWithinWing(om.ExplicitComponent):
@@ -27,31 +36,29 @@ class SparWithinWing(om.ExplicitComponent):
     spar_within_wing[ny-1] : numpy array
         If all the values are negative, each element is within the wing,
         based on the surface's t_over_c value and the current chord.
-        Set a constraint with
-        `OASProblem.add_constraint('spar_within_wing', upper=0.)`
+        Add a constraint on 'spar_within_wing' with upper=0.
     """
 
-    def initialize(self):
-        self.options.declare("surface", types=dict)
+    surface: Surface
+    differentiator: Polymorphic[Differentiator] | None = ComplexStep()
 
-    def setup(self):
-        self.surface = surface = self.options["surface"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        nx, ny = f.surface["mesh"].shape[:2]
+        d = VarDecl()
 
-        self.ny = surface["mesh"].shape[1]
-        nx = surface["mesh"].shape[0]
+        d.add_input("mesh", val=np.zeros((nx, ny, 3)), units="m")
+        d.add_input("radius", val=np.zeros((ny - 1)), units="m")
+        d.add_input("t_over_c", val=np.zeros((ny - 1)))
+        d.add_output("spar_within_wing", val=np.zeros((ny - 1)), units="m")
 
-        self.add_input("mesh", val=np.zeros((nx, self.ny, 3)), units="m")
-        self.add_input("radius", val=np.zeros((self.ny - 1)), units="m")
-        self.add_input("t_over_c", val=np.zeros((self.ny - 1)))
-        self.add_output("spar_within_wing", val=np.zeros((self.ny - 1)), units="m")
+        d.declare_partials("*", "*")
+        return d.into(data)
 
-        self.declare_partials("spar_within_wing", "mesh", method="cs")
-
-        arange = np.arange(self.ny - 1)
-        self.declare_partials("spar_within_wing", "radius", rows=arange, cols=arange, val=1.0)
-
-    def compute(self, inputs, outputs):
-        mesh = inputs["mesh"]
-        t_over_c = inputs["t_over_c"]
-        max_radius = radii(mesh, t_over_c)
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None):
+        max_radius = radii(inputs["mesh"], inputs["t_over_c"])
         outputs["spar_within_wing"] = inputs["radius"] - max_radius
