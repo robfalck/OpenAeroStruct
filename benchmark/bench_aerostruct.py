@@ -3,6 +3,7 @@
 Run from the repo root: pixi run python benchmark/bench_aerostruct.py
 """
 
+import argparse
 import contextlib
 import io
 import sys
@@ -105,6 +106,20 @@ def build4(S):
     return p
 
 
+LINEAR_SOLVERS = {
+    "direct": lambda: om.DirectSolver(assembled_format="sparse"),
+    "lbgs": lambda: om.LinearBlockGS(maxiter=100, atol=1e-10, rtol=1e-10),
+    "gmres": lambda: om.ScipyGMRES(maxiter=200, atol=1e-10, rtol=1e-10),
+}
+
+
+def use_linear_solver(name):
+    """Make `AerostructPoint` build its coupled group with the named om4 linear solver (om3 is unaffected)."""
+    if name != "direct":
+        # AerostructPoint hardcodes om.DirectSolver for the coupled group; swap it for this run.
+        om.DirectSolver = lambda **kwargs: LINEAR_SOLVERS[name]()
+
+
 def t(f):
     t0 = time.perf_counter()
     r = f()
@@ -121,19 +136,34 @@ def bench(build, S):
 
     t2 = min(rerun(4.0), rerun(6.0))
     fb = float(np.ravel(p.get_val("AS_point_0.fuelburn"))[0])
-    tt, _ = t(lambda: p.compute_totals(of=["AS_point_0.fuelburn"], wrt=["wing.thickness_cp"]))
-    return ts, t1, t2, tt, fb
+    tt, J = t(lambda: p.compute_totals(of=["AS_point_0.fuelburn"], wrt=["wing.thickness_cp"]))
+    dfb = float(np.ravel(np.asarray(J["AS_point_0.fuelburn", "wing.thickness_cp"]))[0])
+    return ts, t1, t2, tt, fb, dfb
 
 
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument(
+        "--linear-solver",
+        choices=sorted(LINEAR_SOLVERS),
+        default="direct",
+        help="om4 linear solver for the coupled group (default: direct, as in OM3). om3 always uses DirectSolver",
+    )
+    ap.add_argument("--no-om3", action="store_true", help="skip the OM3 reference runs")
+    args = ap.parse_args()
+    use_linear_solver(args.linear_solver)
+
+    builds = (("om4", build4),) if args.no_om3 else (("om3", build3), ("om4", build4))
+    print(f"om4 coupled linear solver: {args.linear_solver}")
     for nx, ny in ((2, 5), (3, 21), (4, 41)):
         S = surf(nx, ny)
         res = {}
-        for label, build in (("om3", build3), ("om4", build4)):
+        for label, build in builds:
             with contextlib.redirect_stdout(io.StringIO()):
                 res[label] = bench(build, S)
         print(f"nx={nx} ny={ny}")
         for k, v in res.items():
             print(
-                f"  {k}: build/setup {v[0]:.2f}s  first run {v[1]:.2f}s  rerun {v[2]:.2f}s  totals {v[3]:.2f}s  fuelburn {v[4]:.4f}"
+                f"  {k}: build/setup {v[0]:.2f}s  first run {v[1]:.2f}s  rerun {v[2]:.2f}s  totals {v[3]:.2f}s"
+                f"  fuelburn {v[4]:.4f}  dfb/dt[0] {v[5]:.6f}"
             )
