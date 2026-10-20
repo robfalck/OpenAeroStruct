@@ -113,18 +113,31 @@ def build4(S):
     return p
 
 
+# Captured before any monkeypatching below, so LINEAR_SOLVERS["direct"] always builds the
+# real scipy-backed solver even after use_linear_solver() has pointed om.DirectSolver
+# elsewhere for a previous solver in the same process (needed to run multiple
+# --linear-solver values back to back).
+_ScipyDirectSolver = om.DirectSolver
+
 LINEAR_SOLVERS = {
-    "direct": lambda: om.DirectSolver(assembled_format="sparse"),
-    "lbgs": lambda: om.LinearBlockGS(maxiter=100, atol=1e-10, rtol=1e-10),
+    "direct": lambda: _ScipyDirectSolver(assembled_format="sparse"),
+    "gs": lambda: om.LinearBlockGS(maxiter=100, atol=1e-10, rtol=1e-10),
     "gmres": lambda: om.ScipyGMRES(maxiter=200, atol=1e-10, rtol=1e-10),
+    # PETSc backends need petsc4py (included in the default pixi environment). "petsc" (PETSc's
+    # own native LU) and "superlu_dist" are left out: the former errors on this model's Jacobian
+    # ("Matrix is missing diagonal entries"), the latter has a documented serial-transpose bug
+    # (see PETScLU.solve's docstring) and compute_totals needs transpose solves in rev mode.
+    "petsc-superlu": lambda: om.PETScDirectSolver(assembled_format="sparse", sparse_solver_name="superlu"),
+    "petsc-klu": lambda: om.PETScDirectSolver(assembled_format="sparse", sparse_solver_name="klu"),
+    "petsc-umfpack": lambda: om.PETScDirectSolver(assembled_format="sparse", sparse_solver_name="umfpack"),
+    "petsc-mumps": lambda: om.PETScDirectSolver(assembled_format="sparse", sparse_solver_name="mumps"),
 }
 
 
 def use_linear_solver(name):
     """Make `AerostructPoint` build its coupled group with the named om4 linear solver (om3 is unaffected)."""
-    if name != "direct":
-        # AerostructPoint hardcodes om.DirectSolver for the coupled group; swap it for this run.
-        om.DirectSolver = lambda **kwargs: LINEAR_SOLVERS[name]()
+    # AerostructPoint hardcodes om.DirectSolver for the coupled group; swap it for this run.
+    om.DirectSolver = lambda **kwargs: LINEAR_SOLVERS[name]()
 
 
 def t(f):
@@ -154,7 +167,9 @@ if __name__ == "__main__":
         "--linear-solver",
         choices=sorted(LINEAR_SOLVERS),
         default="direct",
-        help="om4 linear solver for the coupled group (default: direct, as in OM3). om3 always uses DirectSolver",
+        help=(
+            "om4 linear solver for the coupled group (default: direct, as in OM3). om3 always uses DirectSolver."
+        ),
     )
     ap.add_argument("--no-om3", action="store_true", help="skip the OM3 reference runs")
     ap.add_argument(

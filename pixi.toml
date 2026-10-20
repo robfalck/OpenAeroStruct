@@ -40,6 +40,21 @@ python = "3.12.*"
 [feature.py313.dependencies]
 python = "3.13.*"
 
+[feature.petsc.target.linux-64.dependencies]
+# For om4's PETScDirectSolver/PETScKrylov; petsc4py needs an MPI build even for
+# serial use, so pull in the same MPI stack as om4's own "mpi" feature.
+# No conda-forge petsc build for win-64, so this feature is *nix-only.
+openmpi = "*"
+mpi4py = "*"
+petsc = "*"
+petsc4py = "*"
+
+[feature.petsc.target.osx-arm64.dependencies]
+openmpi = "*"
+mpi4py = "*"
+petsc = "*"
+petsc4py = "*"
+
 [pypi-dependencies]
 # OpenAeroStruct itself, installed editable from this repo.
 openaerostruct = { path = ".", editable = true }
@@ -52,8 +67,8 @@ jaxlib = "*"
 asdex = "*"
 
 [environments]
-default = { features = ["py313", "dev", "opt"] }
-py312 = { features = ["py312", "dev", "opt"] }
+default = { features = ["py313", "dev", "opt", "petsc"] }
+py312 = { features = ["py312", "dev", "opt", "petsc"] }
 
 [activation]
 env = { JAX_PLATFORMS = "cpu", PYTHONUTF8 = "1" }
