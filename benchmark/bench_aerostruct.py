@@ -97,10 +97,17 @@ def build3(S):
     return p
 
 
+COLLAPSE_BY_GROUP = False
+
+
 def build4(S):
     conns = [om.Connection(src="wing." + a, tgt="AS_point_0." + b) for a, b in CONN]
     pt = P4(surfaces=[dict(S)], promotes_inputs=list(FLOW))
-    p = om.Problem(model=om.Group(subsystems={"wing": G4(surface=dict(S)), "AS_point_0": pt}, connections=conns))
+    overrides = {"*": {"collapse_by": "group"}} if COLLAPSE_BY_GROUP else {}
+    p = om.Problem(
+        model=om.Group(subsystems={"wing": G4(surface=dict(S)), "AS_point_0": pt}, connections=conns),
+        model_overrides=overrides,
+    )
     for k, (v, u) in FLOW.items():
         p.set_val(k, v, units=u)
     return p
@@ -150,11 +157,17 @@ if __name__ == "__main__":
         help="om4 linear solver for the coupled group (default: direct, as in OM3). om3 always uses DirectSolver",
     )
     ap.add_argument("--no-om3", action="store_true", help="skip the OM3 reference runs")
+    ap.add_argument(
+        "--collapse-by-group",
+        action="store_true",
+        help='om4 only: set collapse_by="group" on every system via model_overrides (default: "cycle")',
+    )
     args = ap.parse_args()
+    COLLAPSE_BY_GROUP = args.collapse_by_group
     use_linear_solver(args.linear_solver)
 
     builds = (("om4", build4),) if args.no_om3 else (("om3", build3), ("om4", build4))
-    print(f"om4 coupled linear solver: {args.linear_solver}")
+    print(f"om4 coupled linear solver: {args.linear_solver}, collapse_by: {'group' if COLLAPSE_BY_GROUP else 'cycle'}")
     for nx, ny in ((2, 5), (3, 21), (4, 41)):
         S = surf(nx, ny)
         res = {}
