@@ -3,7 +3,12 @@ name = "openaerostruct"
 version = "3.0.0.dev0"
 description = "Pixi environment for OpenAeroStruct on OpenMDAO 4 (om4)."
 channels = ["conda-forge"]
-platforms = ["osx-arm64", "linux-64", "win-64"]
+# macos = "15.0" raises the osx-arm64 baseline pixi assumes for PyPI wheel
+# compatibility (default is 11.0) so the resolver picks unopy's
+# macosx_15_0_arm64 wheel instead of falling back to its sdist -- a wheel's
+# macOS tag is a minimum deployment target, so this can only add eligible
+# wheels, never remove ones that matched at 11.0.
+platforms = [{ platform = "osx-arm64", macos = "15.0" }, "linux-64", "win-64"]
 
 [dependencies]
 python = ">=3.12"
@@ -33,6 +38,41 @@ pre-commit = ">=4.0,<5"
 
 [feature.opt.dependencies]
 pyoptsparse = ">=2.14.0"
+
+# pyoptsparse ships the pyIPOPT wrapper unconditionally, but it imports cyipopt,
+# which is a separate package -- without this, OPT('IPOPT') raises ModuleNotFoundError
+# and list_optimizers() silently omits IPOPT.
+#
+# *nix only: on win-64, cyipopt's dependency chain (ipopt -> mumps-seq ->
+# libflang, which bundles a fixed openmp==5.0.0) conflicts with this repo's
+# win-64 libopenblas/libblas pin below (added for an unrelated MKL/OpenBLAS
+# crash workaround), so the solver can't satisfy both at once.
+[feature.opt.target.linux-64.dependencies]
+cyipopt = "*"
+
+[feature.opt.target.osx-arm64.dependencies]
+cyipopt = "*"
+
+# pyoptsparse's Uno wrapper imports unopy, which is published on PyPI only (no
+# conda-forge build). Kept as its own feature so environments that don't need
+# it (e.g. a future docs env) don't pull a solver they never run.
+#
+# unopy ships prebuilt wheels; llvm-openmp/pkg-config are only needed as a
+# fallback if the resolver ever falls back to building its sdist. *nix only,
+# for the same win-64 openmp pin conflict as cyipopt above.
+[feature.uno.target.linux-64.dependencies]
+llvm-openmp = "*"
+pkg-config = "*"
+
+[feature.uno.target.osx-arm64.dependencies]
+llvm-openmp = "*"
+pkg-config = "*"
+
+[feature.uno.target.linux-64.pypi-dependencies]
+unopy = "*"
+
+[feature.uno.target.osx-arm64.pypi-dependencies]
+unopy = "*"
 
 [feature.py312.dependencies]
 python = "3.12.*"
@@ -67,8 +107,8 @@ jaxlib = "*"
 asdex = "*"
 
 [environments]
-default = { features = ["py313", "dev", "opt", "petsc"] }
-py312 = { features = ["py312", "dev", "opt", "petsc"] }
+default = { features = ["py313", "dev", "opt", "uno", "petsc"] }
+py312 = { features = ["py312", "dev", "opt", "uno", "petsc"] }
 
 [activation]
 env = { JAX_PLATFORMS = "cpu", PYTHONUTF8 = "1" }

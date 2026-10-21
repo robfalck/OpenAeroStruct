@@ -22,6 +22,9 @@ from oas_om3.integration.aerostruct_groups import AerostructGeometry as G3, Aero
 from openaerostruct.integration.aerostruct_groups import AerostructGeometry as G4, AerostructPoint as P4  # noqa: E402
 from openaerostruct.meshing.mesh_generator import generate_mesh  # noqa: E402
 from openaerostruct.utils.constants import grav_constant  # noqa: E402
+from om4.variables.design_var import DesignVar  # noqa: E402
+from om4.variables.response import Constraint, Objective  # noqa: E402
+from om4.transforms.transform import AffineTransform  # noqa: E402
 
 FLOW = {
     "v": (248.136, "m/s"),
@@ -93,20 +96,60 @@ def build3(S):
         p.model.connect(k, "AS_point_0." + k)
     for a, b in CONN:
         p.model.connect("wing." + a, "AS_point_0." + b)
+    if OPT is not None:
+        backend, method = OPT
+        p.driver = om3.ScipyOptimizeDriver(optimizer=method) if backend == "scipy" else om3.pyOptSparseDriver(optimizer=method)
+        p.model.add_design_var("wing.twist_cp", lower=-10.0, upper=15.0)
+        p.model.add_design_var("wing.thickness_cp", lower=0.01, upper=0.5, scaler=1e2)
+        p.model.add_design_var("alpha", lower=-10.0, upper=10.0)
+        p.model.add_constraint("AS_point_0.wing_perf.failure", upper=0.0)
+        p.model.add_constraint("AS_point_0.wing_perf.thickness_intersects", upper=0.0)
+        p.model.add_constraint("AS_point_0.L_equals_W", equals=0.0)
+        p.model.add_objective("AS_point_0.fuelburn", scaler=1e-5)
     p.setup()
     return p
 
 
 COLLAPSE_BY_GROUP = False
 FEN = False
+OPT = None
 
 
 def build4(S):
     conns = [om.Connection(src="wing." + a, tgt="AS_point_0." + b) for a, b in CONN]
-    pt = P4(surfaces=[dict(S)], promotes_inputs=list(FLOW), fen=FEN)
+
+    geom_kwargs, pt_kwargs, group_kwargs = {}, {}, {}
+    if OPT is not None:
+        backend, method = OPT
+        geom_kwargs["design_vars"] = {
+            "twist_cp": DesignVar(lower=-10.0, upper=15.0),
+            "thickness_cp": DesignVar(
+                lower=0.01, upper=0.5, transform=AffineTransform.from_scaler_adder(scaler=1e2)
+            ),
+        }
+        pt_kwargs["design_vars"] = {"alpha": DesignVar(lower=-10.0, upper=10.0)}
+        pt_kwargs["constraints"] = {
+            "wing_perf.failure": Constraint(upper=0.0),
+            "wing_perf.thickness_intersects": Constraint(upper=0.0),
+            "L_equals_W": Constraint(equals=0.0),
+        }
+        pt_kwargs["objectives"] = {
+            "fuelburn": Objective(transform=AffineTransform.from_scaler_adder(scaler=1e-5))
+        }
+        group_kwargs["optimizer"] = (
+            om.ScipyMinimizeOptimizer(optimizer=method)
+            if backend == "scipy"
+            else om.PyOptSparseOptimizer(optimizer=method)
+        )
+
+    pt = P4(surfaces=[dict(S)], promotes_inputs=list(FLOW), fen=FEN, **pt_kwargs)
     overrides = {"*": {"collapse_by": "group"}} if COLLAPSE_BY_GROUP else {}
     p = om.Problem(
-        model=om.Group(subsystems={"wing": G4(surface=dict(S)), "AS_point_0": pt}, connections=conns),
+        model=om.Group(
+            subsystems={"wing": G4(surface=dict(S), **geom_kwargs), "AS_point_0": pt},
+            connections=conns,
+            **group_kwargs,
+        ),
         model_overrides=overrides,
     )
     for k, (v, u) in FLOW.items():
@@ -162,6 +205,23 @@ def bench(build, S):
     return ts, t1, t2, tt, fb, dfb
 
 
+def bench_opt(build, S, label):
+    ts, p = t(lambda: build(S))
+    if label == "om3":
+        to, failed = t(p.run_driver)
+        converged = not failed
+        extra = ""
+    else:
+        to, result = t(p.run_optimizer)
+        converged = result.converged
+        extra = (
+            f"  iters {result.iterations}  model_evals {result.model_evals}"
+            f"  deriv_evals {result.deriv_evals}  deriv_time {result.deriv_time:.2f}s"
+        )
+    fb = float(np.ravel(p.get_val("AS_point_0.fuelburn"))[0])
+    return ts, to, fb, converged, extra
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
@@ -184,25 +244,43 @@ if __name__ == "__main__":
         help="om4 only: wrap AS_point_0's coupled group as a FunctionalExecutionNode, hiding its "
         "internal states from the outer linear system.",
     )
+    ap.add_argument(
+        "--opt",
+        default=None,
+        help="Run the wing.twist_cp/thickness_cp + alpha fuelburn-minimization optimization "
+        "instead of a single-point analysis. Form: 'scipy-{method}' or 'pyoptsparse-{method}', "
+        "e.g. 'scipy-slsqp', 'scipy-trust-constr', 'pyoptsparse-slsqp', 'pyoptsparse-ipopt'.",
+    )
     args = ap.parse_args()
     COLLAPSE_BY_GROUP = args.collapse_by_group
     FEN = args.fen
     use_linear_solver(args.linear_solver)
 
+    OPT = None
+    if args.opt:
+        opt_backend, _, opt_method = args.opt.partition("-")
+        if opt_backend not in ("scipy", "pyoptsparse"):
+            ap.error(f"--opt backend must be 'scipy' or 'pyoptsparse', got {opt_backend!r}")
+        OPT = (opt_backend, opt_method)
+
     builds = (("om4", build4),) if args.no_om3 else (("om3", build3), ("om4", build4))
     print(
         f"om4 coupled linear solver: {args.linear_solver}, collapse_by: {'group' if COLLAPSE_BY_GROUP else 'cycle'}, "
-        f"fen: {FEN}"
+        f"fen: {FEN}, opt: {OPT}"
     )
     for nx, ny in ((2, 5), (3, 21), (4, 41)):
         S = surf(nx, ny)
         res = {}
         for label, build in builds:
             with contextlib.redirect_stdout(io.StringIO()):
-                res[label] = bench(build, S)
+                res[label] = bench_opt(build, S, label) if OPT is not None else bench(build, S)
         print(f"nx={nx} ny={ny}")
         for k, v in res.items():
-            print(
-                f"  {k}: build/setup {v[0]:.2f}s  first run {v[1]:.2f}s  rerun {v[2]:.2f}s  totals {v[3]:.2f}s"
-                f"  fuelburn {v[4]:.4f}  dfb/dt[0] {v[5]:.6f}"
-            )
+            if OPT is not None:
+                ts, to, fb, converged, extra = v
+                print(f"  {k}: setup {ts:.2f}s  optimize {to:.2f}s  fuelburn {fb:.4f}  converged {converged}{extra}")
+            else:
+                print(
+                    f"  {k}: build/setup {v[0]:.2f}s  first run {v[1]:.2f}s  rerun {v[2]:.2f}s  totals {v[3]:.2f}s"
+                    f"  fuelburn {v[4]:.4f}  dfb/dt[0] {v[5]:.6f}"
+                )
