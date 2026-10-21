@@ -227,6 +227,7 @@ def _aerostruct_point_kwargs(
     internally_connect_fuelburn: bool,
     compressible: bool,
     rotational: bool,
+    fen: bool,
 ) -> dict:
     if compressible:
         raise NotImplementedError("Compressible VLM states are not yet ported to om4; see ai/TECH_DEBT.md.")
@@ -305,6 +306,43 @@ def _aerostruct_point_kwargs(
     if rotational:
         coupled_prom_in.extend(["omega", "empty_cg"])
 
+    input_defaults = {
+        "beta": om.InputDefault(val=np.zeros(1), units="deg"),
+        "alpha": om.InputDefault(val=np.zeros(1), units="deg"),
+        "v": om.InputDefault(val=np.ones(1), units="m/s"),
+        "rho": om.InputDefault(val=np.ones(1), units="kg/m**3"),
+        "Mach_number": om.InputDefault(val=np.zeros(1)),
+    }
+
+    interface_inputs = None
+    interface_outputs = None
+    coupled_input_defaults = {}
+    if fen:
+        # The coupled group's inputs that are never satisfied by an internal connection or
+        # same-name promotion: the globally promoted ones plus, per surface, the CoupledAS
+        # boundary inputs that every caller wires in from AerostructGeometry.
+        interface_inputs = list(coupled_prom_in)
+        for surface in surfaces:
+            name = surface["name"]
+            interface_inputs += [f"{name}.local_stiff_transformed", f"{name}.nodes", f"{name}.mesh"]
+
+        # Every output of `coupled` that a sibling (performance group) consumes: exactly the
+        # sources already recorded in `connections` that live inside `coupled`.
+        seen = set()
+        interface_outputs = []
+        for c in connections:
+            if c.src.startswith("coupled."):
+                rel = c.src[len("coupled.") :]
+                if rel not in seen:
+                    seen.add(rel)
+                    interface_outputs.append(rel)
+
+        # A FEN is its own connection-graph domain, so promoted-name default ambiguities
+        # (e.g. `alpha` at 0 deg vs 1 deg across its leaves) are no longer resolved by
+        # AerostructPoint's own `input_defaults` below; `coupled` needs its own copy for
+        # whichever ambiguous names it actually promotes.
+        coupled_input_defaults = {k: v for k, v in input_defaults.items() if k in coupled_prom_in}
+
     coupled = om.Group(
         subsystems=coupled_subs,
         connections=coupled_conns,
@@ -318,6 +356,9 @@ def _aerostruct_point_kwargs(
             err_on_non_converge=True,
         ),
         linear_solver=om.DirectSolver(assembled_format="sparse"),
+        interface_inputs=interface_inputs,
+        interface_outputs=interface_outputs,
+        input_defaults=coupled_input_defaults,
     )
 
     subs = {"coupled": coupled}
@@ -347,13 +388,6 @@ def _aerostruct_point_kwargs(
         promotes_outputs=["L_equals_W", "fuelburn", "CL", "CD", "CM", "cg"],
     )
 
-    input_defaults = {
-        "beta": om.InputDefault(val=np.zeros(1), units="deg"),
-        "alpha": om.InputDefault(val=np.zeros(1), units="deg"),
-        "v": om.InputDefault(val=np.ones(1), units="m/s"),
-        "rho": om.InputDefault(val=np.ones(1), units="kg/m**3"),
-        "Mach_number": om.InputDefault(val=np.zeros(1)),
-    }
     return {"subsystems": subs, "connections": connections, "input_defaults": input_defaults}
 
 
@@ -367,6 +401,11 @@ class AerostructPoint(om.Group):
         default=False, description="Compressibility correction for moderate Mach number flows (not yet ported)."
     )
     rotational: bool = Field(default=False, description="Turn on support for computing angular velocities.")
+    fen: bool = Field(
+        default=False,
+        description="Wrap the coupled group as a FunctionalExecutionNode, hiding its internal states "
+        "from the outer linear system and exposing only its interface inputs/outputs.",
+    )
 
     # Derived from the fields above; not part of the constructor API.
     subsystems: dict[str, Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
@@ -381,7 +420,12 @@ class AerostructPoint(om.Group):
         f = field_values(cls, data)
         data.update(
             _aerostruct_point_kwargs(
-                f.surfaces, f.user_specified_Sref, f.internally_connect_fuelburn, f.compressible, f.rotational
+                f.surfaces,
+                f.user_specified_Sref,
+                f.internally_connect_fuelburn,
+                f.compressible,
+                f.rotational,
+                f.fen,
             )
         )
         return data
