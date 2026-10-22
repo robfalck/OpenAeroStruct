@@ -229,8 +229,15 @@ if __name__ == "__main__":
         choices=sorted(LINEAR_SOLVERS),
         default="direct",
         help=(
-            "om4 linear solver for the coupled group (default: direct, as in OM3). om3 always uses DirectSolver."
+            "om4 linear solver for the coupled group (default: direct, as in OM3). "
+            "Only the petsc-* choices are also available in OM3, via --om3-petsc."
         ),
+    )
+    ap.add_argument(
+        "--om3-petsc",
+        action="store_true",
+        help="om3 too: use OM3's PETScDirectSolver with the same sparse_solver_name as --linear-solver "
+        "(which must then be a petsc-* choice).",
     )
     ap.add_argument("--no-om3", action="store_true", help="skip the OM3 reference runs")
     ap.add_argument(
@@ -255,6 +262,12 @@ if __name__ == "__main__":
     COLLAPSE_BY_GROUP = args.collapse_by_group
     FEN = args.fen
     use_linear_solver(args.linear_solver)
+    if args.om3_petsc:
+        if not args.linear_solver.startswith("petsc-"):
+            ap.error("--om3-petsc requires a petsc-* --linear-solver")
+        _om3_sparse_name = args.linear_solver.removeprefix("petsc-")
+        # oas_om3 builds its coupled group with om.DirectSolver(assemble_jac=True); swap it for this run.
+        om3.DirectSolver = lambda **kwargs: om3.PETScDirectSolver(sparse_solver_name=_om3_sparse_name)
 
     OPT = None
     if args.opt:

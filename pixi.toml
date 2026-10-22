@@ -60,6 +60,12 @@ cyipopt = "*"
 # unopy ships prebuilt wheels; llvm-openmp/pkg-config are only needed as a
 # fallback if the resolver ever falls back to building its sdist. *nix only,
 # for the same win-64 openmp pin conflict as cyipopt above.
+#
+# Pinned <0.4.15: 0.4.15 dropped loose_primal_tolerance/loose_dual_tolerance/
+# loose_tolerance_iteration_threshold, which pyoptsparse's pyUno still sets
+# unconditionally, raising KeyError('loose_primal_tolerance does not exist')
+# on every run. Fixed upstream (mdolab/pyoptsparse#501) but not yet in a
+# pyoptsparse release. Unpin once a pyoptsparse release includes that fix.
 [feature.uno.target.linux-64.dependencies]
 llvm-openmp = "*"
 pkg-config = "*"
@@ -69,10 +75,10 @@ llvm-openmp = "*"
 pkg-config = "*"
 
 [feature.uno.target.linux-64.pypi-dependencies]
-unopy = "*"
+unopy = "<0.4.15"
 
 [feature.uno.target.osx-arm64.pypi-dependencies]
-unopy = "*"
+unopy = "<0.4.15"
 
 [feature.py312.dependencies]
 python = "3.12.*"

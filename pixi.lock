@@ -286,13 +286,13 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/4d/2e/7b708a72001323dc6b2930834d63e355870ea5b1ee8d1450e0fe1a24752b/multidict-7.1.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/52/59/0782e51887ac6b07ffd1570e0364cf901ebc36345fea669969d2084baebb/simple_websocket-1.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/53/20/d92d7d0a18052f083cdcb75c41c34a4cddcb01f746796fe9a1264b54ec73/asdex-0.5.2-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/55/2f/ae522c1e0a462b983796f7d757b02bef92043b9360801b88d89cec184d6d/unopy-0.4.16-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/60/45/c7b5c3168458db837e8ceab06dc77824e18202679d0463f0e8f002143a97/tinycss2-1.5.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/60/d1/38f3a3405989a89ac18390803e70c6ad7c7760da4f9b83cbeca0c44a0c72/python_dotenv-1.2.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/63/e0/cec6865dfe88cb48fedd4b20aed6af5158e41092adcbf3e028bcc6ec2108/markupsafe-3.0.4-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/66/ff/a24464b158bbabfdb47d3f7883855c3fffad523c14e35c76d4063db58a84/unopy-0.4.14-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/71/43/1947f06babed6b3f1d7f38b0c767f52df66bfb2bc10b468c4a7de9eceff2/aiohappyeyeballs-2.7.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/77/c6/040cbc72480d789a5f40d63fb484d3106554c4dfa2d2b70ad5022057750f/webencodings-0.6.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/79/f6/0caa51b077492a7306bdbd9dfb907a2246985f0aed1fe2d086255921848b/httptools-0.9.0-cp313-cp313-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
@@ -504,6 +504,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/16/df/ab0ed0445d8d81a133c8fed760f3b4f743a2f563804fdbecb2c32fe05d94/websockets-17.3-cp313-cp313-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/1e/41/f7dcf80b81ee8e71c1a2b59f14208bc723edbd89ed027a73b175abf6348e/opentelemetry_api-1.45.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/1f/19/725d23160b2471a3f27026c55bb79af34687652d8be8f5f583cee5dcd42f/orjson-3.13.0-cp313-cp313-macosx_15_0_arm64.whl
+      - pypi: https://files.pythonhosted.org/packages/22/5f/593dd945b12a184a0f826feec3bc6e490e3df872a25ea8af4ebf97c68de9/unopy-0.4.14-cp313-cp313-macosx_15_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/23/cd/066e86230ae37ed0be70aae89aabf03ca8d9f39c8aea0dec8029455b5540/opt_einsum-3.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/25/7d/c1ab1ef09e9d4d835be5d58c0a32a1e1de8397abaa4e502a9d4141328cad/propcache-0.5.4-cp313-cp313-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl
@@ -523,7 +524,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/71/43/1947f06babed6b3f1d7f38b0c767f52df66bfb2bc10b468c4a7de9eceff2/aiohappyeyeballs-2.7.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/77/c6/040cbc72480d789a5f40d63fb484d3106554c4dfa2d2b70ad5022057750f/webencodings-0.6.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/7e/f5/f66802a942d491edb555dd61e3a9961140fd64c90bce1eafd741609d334d/httpcore-1.0.9-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/87/b8/58a929deeb3d235e652a67c6396d8bb62be4d7f37a442f776fab1d50f21e/unopy-0.4.16-cp313-cp313-macosx_15_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/8c/55/477c351b21b34fe948ffffa8b64cd0c246efd998fed3de922b217e632e59/multidict-7.1.0-cp313-cp313-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/8d/35/b03b5df04a1a8ee400c9df4b1795af84370b2bb6f1cc4be57c0b79688d00/fastapi-0.159.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/97/53/2a3c7d562271ec6b6e38e7216b3104899f8aa4180c0713cb8aaf69e29cd5/bidict-0.24.1-py3-none-any.whl
@@ -985,11 +985,11 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/04/96/92447566d16df59b2a776c0fb82dbc4d9e07cd95062562af01e408583fc4/itsdangerous-2.2.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/12/b8/4bd346e22b28902df4d651910f5242c28d84e4a5c2435ca5c3f797ed7e2e/anyio-4.15.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/1e/41/f7dcf80b81ee8e71c1a2b59f14208bc723edbd89ed027a73b175abf6348e/opentelemetry_api-1.45.1-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/1e/9a/606e7d55534a9c6967c7136003c96915cf9cc9debaf9f532d8561b665b65/unopy-0.4.16-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/23/cd/066e86230ae37ed0be70aae89aabf03ca8d9f39c8aea0dec8029455b5540/opt_einsum-3.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/32/91/30151a39f7570f448ed84529390628a651d7f27c87d73c9b887f8189695e/docutils-0.23-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/38/0c/b54a4fdd7f90a3af8b02ebc9ce6712c2c208b7926a2f7bad95c33ebbe943/uvicorn-0.54.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/3a/93/7c4eef7973a91f39419e236bd20726ae6a9ef747523f544067bc5d1e8ed2/unopy-0.4.14-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/3d/9c/91889c8c62fb7d16cd58e3074473a259303d6229bf0ce496aec87e66f3dc/websockets-17.3-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/3e/30/e900b21425a860e195f32e37657aa1f7c7f2b1bfb26f03ca209b90933c06/annotated_doc-0.0.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/43/af/4b3891eb0a49d6cfd5cbf3e9bf514c943afc2b0f13e2c57cc57cd88ecc21/markdown2-2.5.5-py3-none-any.whl
@@ -1225,7 +1225,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/38/0c/b54a4fdd7f90a3af8b02ebc9ce6712c2c208b7926a2f7bad95c33ebbe943/uvicorn-0.54.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/3e/30/e900b21425a860e195f32e37657aa1f7c7f2b1bfb26f03ca209b90933c06/annotated_doc-0.0.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/43/af/4b3891eb0a49d6cfd5cbf3e9bf514c943afc2b0f13e2c57cc57cd88ecc21/markdown2-2.5.5-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/49/6a/8692ebccfb903e0602fb974305e7e6d5f8822b22a433509acce9ac0e57e4/unopy-0.4.16-cp312-cp312-macosx_15_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/52/59/0782e51887ac6b07ffd1570e0364cf901ebc36345fea669969d2084baebb/simple_websocket-1.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/53/20/d92d7d0a18052f083cdcb75c41c34a4cddcb01f746796fe9a1264b54ec73/asdex-0.5.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl
@@ -1258,6 +1257,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/f3/93/181df62699d9b5aca1d87e5cfda131dac87e3cdaebf668662f7206ca3470/starlette-1.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f9/5d/be6a4b67161462d1a0a97c7405459c2f76a4c23c66b39ad496527f68a17d/jax-0.12.0.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/fb/76/641ae371508676492379f16e2fa48f4e2c11741bd63c48be4b12a6b09cba/aiosignal-1.4.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/fe/b2/cee69af75c1180cb349368e3c8f5337606cd1ec3eee7eef636422b757dad/unopy-0.4.14-cp312-cp312-macosx_15_0_arm64.whl
       win-64:
       - conda: https://conda.anaconda.org/conda-forge/noarch/_python_abi3_support-1.0-hd8ed1ab_3.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/annotated-types-0.8.0-pyhd8ed1ab_0.conda
@@ -10344,17 +10344,17 @@ packages:
   requires_dist:
   - typing-extensions>=4.5.0
   requires_python: '>=3.10'
-- pypi: https://files.pythonhosted.org/packages/1e/9a/606e7d55534a9c6967c7136003c96915cf9cc9debaf9f532d8561b665b65/unopy-0.4.16-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-  name: unopy
-  version: 0.4.16
-  sha256: f7ac59972d8c47ac3c272a2e8fe6d139399ea50fc5bde96151a9a68936f10921
-  requires_dist:
-  - numpy
 - pypi: https://files.pythonhosted.org/packages/1f/19/725d23160b2471a3f27026c55bb79af34687652d8be8f5f583cee5dcd42f/orjson-3.13.0-cp313-cp313-macosx_15_0_arm64.whl
   name: orjson
   version: 3.13.0
   sha256: ded33b972cffdaf4ca0ac917338ab61d2bb10d68987dbcae641c313fbfdbf499
   requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/22/5f/593dd945b12a184a0f826feec3bc6e490e3df872a25ea8af4ebf97c68de9/unopy-0.4.14-cp313-cp313-macosx_15_0_arm64.whl
+  name: unopy
+  version: 0.4.14
+  sha256: 394c37bc1c8b57844765c9e13bbd9f2774331c53bc397f3f84bf542f44045999
+  requires_dist:
+  - numpy
 - pypi: https://files.pythonhosted.org/packages/22/7d/a27f25451c4cc62141992b51005688481210f3d3e63de3dc66f9e882ba59/websockets-17.3-cp312-cp312-macosx_11_0_arm64.whl
   name: websockets
   version: '17.3'
@@ -10464,6 +10464,12 @@ packages:
   - multidict>=4.0
   - propcache>=0.2.1
   requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/3a/93/7c4eef7973a91f39419e236bd20726ae6a9ef747523f544067bc5d1e8ed2/unopy-0.4.14-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+  name: unopy
+  version: 0.4.14
+  sha256: 3518eee202c93f80b5dc563ab18f652aef975d9d71b42e778a30c23f6e9ce90b
+  requires_dist:
+  - numpy
 - pypi: https://files.pythonhosted.org/packages/3d/9c/91889c8c62fb7d16cd58e3074473a259303d6229bf0ce496aec87e66f3dc/websockets-17.3-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
   name: websockets
   version: '17.3'
@@ -10503,12 +10509,6 @@ packages:
   requires_dist:
   - anyio>=3.0.0
   requires_python: '>=3.10'
-- pypi: https://files.pythonhosted.org/packages/49/6a/8692ebccfb903e0602fb974305e7e6d5f8822b22a433509acce9ac0e57e4/unopy-0.4.16-cp312-cp312-macosx_15_0_arm64.whl
-  name: unopy
-  version: 0.4.16
-  sha256: 9ed1bdaaf24b7be045c2ecf484fbf1d19d5742ca104ab51336d48b416d2e0ff7
-  requires_dist:
-  - numpy
 - pypi: https://files.pythonhosted.org/packages/4c/72/22b6449e15bec4cc86c62b659e6c625ab777d01e87aaec717ecef440f87a/llvmlite-0.50.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
   name: llvmlite
   version: 0.50.0
@@ -10589,12 +10589,6 @@ packages:
   - matplotlib>=3.5.0 ; extra == 'matplotlib'
   - scipy>=1.11.0 ; extra == 'scipy'
   requires_python: '>=3.12'
-- pypi: https://files.pythonhosted.org/packages/55/2f/ae522c1e0a462b983796f7d757b02bef92043b9360801b88d89cec184d6d/unopy-0.4.16-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-  name: unopy
-  version: 0.4.16
-  sha256: 0353f0f62e14dd5e819d448c5f0f40ffab373e7ad4e44c96efe3477b9bdc08c3
-  requires_dist:
-  - numpy
 - pypi: https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl
   name: click
   version: 8.5.0
@@ -10696,6 +10690,12 @@ packages:
   version: 26.1.0
   sha256: c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
   requires_python: '>=3.9'
+- pypi: https://files.pythonhosted.org/packages/66/ff/a24464b158bbabfdb47d3f7883855c3fffad523c14e35c76d4063db58a84/unopy-0.4.14-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+  name: unopy
+  version: 0.4.14
+  sha256: f00200d38b8563df1063d308da13e3963669bbb937e23956b3cde9c86fa47f56
+  requires_dist:
+  - numpy
 - pypi: https://files.pythonhosted.org/packages/6a/bd/d91c5e39f490a49df14320f4e8c80161cfcce09f1e2cde1edd16a551abb3/frozenlist-1.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
   name: frozenlist
   version: 1.8.0
@@ -10800,12 +10800,6 @@ packages:
   version: 0.5.4
   sha256: 2814ecd8e818f487bee4b0f921bc4d1c176cc5fc71ac0f072d0fa67eda4ac14b
   requires_python: '>=3.10'
-- pypi: https://files.pythonhosted.org/packages/87/b8/58a929deeb3d235e652a67c6396d8bb62be4d7f37a442f776fab1d50f21e/unopy-0.4.16-cp313-cp313-macosx_15_0_arm64.whl
-  name: unopy
-  version: 0.4.16
-  sha256: 5629e02bd7450e7af311abbfb82b31a51984e82968d5ecde5abf6d5c0c17fd90
-  requires_dist:
-  - numpy
 - pypi: https://files.pythonhosted.org/packages/88/9d/fdd72314f3b6c52d1da8a75caa90719464d8997501b367edacbef1ee6f08/fastapi-0.156.2-py3-none-any.whl
   name: fastapi
   version: 0.156.2
@@ -11413,3 +11407,9 @@ packages:
   version: 3.13.0
   sha256: 4ee06e53b998c71ce3eb93b86222912fdd9dcced685ac64d4525d36fac338ea4
   requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/fe/b2/cee69af75c1180cb349368e3c8f5337606cd1ec3eee7eef636422b757dad/unopy-0.4.14-cp312-cp312-macosx_15_0_arm64.whl
+  name: unopy
+  version: 0.4.14
+  sha256: 686ff1fd432ff96cef74ade39667ada26ec2d4f3713e926a8d928497a8585c56
+  requires_dist:
+  - numpy
