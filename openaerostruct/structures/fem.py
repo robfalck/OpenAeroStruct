@@ -8,6 +8,7 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.linalg import splu
 
 import om4.api as om
+from om4.utils.array_utils import array_hash
 
 from openaerostruct.utils.om4_utils import VarDecl, field_values
 from openaerostruct.utils.surface import Surface
@@ -77,6 +78,11 @@ class FEM(om.ImplicitComponent):
 
     _lup: Any = PrivateAttr(default=None)
     _k_data: Any = PrivateAttr(default=None)
+    # Hash of the local_stiff_transformed input the current _lup was factorized from. Within a
+    # single aerostructural NLBGS coupling loop the stiffness only depends on geometry/thickness,
+    # which is fixed for the whole model evaluation -- only `forces` changes between iterations --
+    # so re-factorizing on every solve_nonlinear call (as upstream OM3 does) is pure waste.
+    _k_hash: str | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -160,9 +166,13 @@ class FEM(om.ImplicitComponent):
         outputs : Vector
             unscaled, dimensional output variables read via outputs[key]
         """
-        # lu factorization for use with solve_linear
-        K = self.assemble_CSC_K(inputs)
-        self._lup = splu(K)
+        # lu factorization for use with solve_linear -- skipped when local_stiff_transformed
+        # is unchanged since the last factorization (see _k_hash).
+        k_hash = array_hash(np.ascontiguousarray(inputs["local_stiff_transformed"]))
+        if self._lup is None or k_hash != self._k_hash:
+            K = self.assemble_CSC_K(inputs)
+            self._lup = splu(K)
+            self._k_hash = k_hash
         outputs["disp_aug"] = self._lup.solve(inputs["forces"])
 
     def compute_partials(self, inputs, outputs, J):

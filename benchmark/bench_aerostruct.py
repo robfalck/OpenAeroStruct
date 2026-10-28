@@ -268,6 +268,9 @@ if __name__ == "__main__":
         _om3_sparse_name = args.linear_solver.removeprefix("petsc-")
         # oas_om3 builds its coupled group with om.DirectSolver(assemble_jac=True); swap it for this run.
         om3.DirectSolver = lambda **kwargs: om3.PETScDirectSolver(sparse_solver_name=_om3_sparse_name)
+    elif args.linear_solver == "gs":
+        # OM3 has the same LinearBlockGS, so compare like with like.
+        om3.DirectSolver = lambda **kwargs: om3.LinearBlockGS(maxiter=100, atol=1e-10, rtol=1e-10)
 
     OPT = None
     if args.opt:
