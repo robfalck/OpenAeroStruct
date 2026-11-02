@@ -10,25 +10,23 @@ from om4.utils.polymorphic import Polymorphic
 
 from openaerostruct.geometry.radius_comp import RadiusComp
 from openaerostruct.structures.section_properties_tube import SectionPropertiesTube
-from openaerostruct.utils.bspline_comp import BsplineComp
 from openaerostruct.utils.interpolation import get_normalized_span_coords
-from openaerostruct.utils.om4_utils import field_values
+from openaerostruct.utils.om4_utils import field_values, spline_or_broadcast
 from openaerostruct.utils.surface import Surface
 
 
-def _span_spline(surface: Surface, cp_key: str, name: str, units: str) -> tuple[BsplineComp, om.InputDefault]:
+def _span_spline(surface: Surface, cp_key: str, name: str, units: str) -> tuple[System, om.InputDefault]:
     n_cp = len(surface[cp_key])
     cp_val = np.asarray(surface[cp_key], dtype=float)
-    comp = BsplineComp(
-        num_cp=n_cp,
+    comp = spline_or_broadcast(
+        n_cp=n_cp,
         x_interp=get_normalized_span_coords(surface, mid_panel=True),
-        order=min(n_cp, 4),
-        x_cp_start=0.0,
-        x_cp_end=1.0,
-        cp_name=cp_key,
+        control_name=cp_key,
         interp_name=name,
         units=units,
-        cp_val=cp_val,
+        control_val=cp_val,
+        x_start=0.0,
+        x_end=1.0,
         promotes_inputs=[cp_key],
         promotes_outputs=[name],
     )

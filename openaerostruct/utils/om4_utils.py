@@ -119,6 +119,76 @@ class VarDecl:
         return data
 
 
+def spline_or_broadcast(
+    *,
+    n_cp: int,
+    x_interp: np.ndarray,
+    control_name: str,
+    interp_name: str,
+    units: str | None,
+    control_val: np.ndarray | None,
+    x_start: float | None = None,
+    x_end: float | None = None,
+    promotes_inputs: list[str],
+    promotes_outputs: list[str],
+):
+    """
+    Interpolate ``control_name`` onto ``x_interp`` with a B-spline, or broadcast it.
+
+    om4's ``SplineComp``/``BSplineCurve`` requires ``num_control >= 2`` (ai/OM4_NEEDS.md
+    N-011), unlike OM3's ``SplineComp(method="bsplines")`` which degrades a single control
+    point to a constant (``order=1``). OAS surfaces commonly define single-element
+    control-point arrays (e.g. ``t_over_c_cp``), so that case is handled here by broadcasting
+    the lone value across ``x_interp`` instead of spline-interpolating it.
+
+    om4's ``SplineComp`` also always declares its control-point input with shape
+    ``(vec_size, num_control)`` = ``(1, n_cp)`` (same N-011 entry), unlike OM3/the old local
+    ``BsplineComp``, whose control-point input was 1-D. Nothing else pins that shape down to
+    ``(n_cp,)`` at the group boundary (there is no sibling leaf expecting a 1-D input, unlike
+    the interpolated *output*, which a downstream consumer such as ``GeometryMesh`` always
+    declares 1-D). Left alone this surfaces as a 2-D design variable/`set_val`/`get_val`
+    wherever ``control_name`` is used directly. So for ``n_cp >= 2`` the control value is held
+    by a tiny 1-D passthrough ``ExecComp`` promoted under ``control_name``, whose output feeds
+    the spline's 2-D input through an explicit connection (same-size reshape, as for the
+    output shape).
+    """
+    import om4.api as om
+    from om4.core.group import Connection
+
+    n_interp = len(x_interp)
+    default_val = np.broadcast_to(np.atleast_1d(control_val) if control_val is not None else 1.0, (n_cp,)).copy()
+
+    if n_cp == 1:
+        return om.ExecComp(
+            exprs=[f"{interp_name} = {control_name} * ones({n_interp})"],
+            inputs={control_name: {"units": units, "val": default_val}},
+            outputs={interp_name: {"units": units, "shape": (n_interp,)}},
+            promotes_inputs=promotes_inputs,
+            promotes_outputs=promotes_outputs,
+        )
+
+    holder_in = f"_{control_name}_1d"
+    holder_out = f"_{control_name}_2d"
+    holder = om.ExecComp(
+        exprs=[f"{holder_out} = {holder_in}"],
+        inputs={holder_in: {"units": units, "val": default_val}},
+        outputs={holder_out: {"units": units, "shape": (n_cp,)}},
+        promotes_inputs=[(holder_in, control_name)],
+    )
+    spline = om.SplineComp(
+        curve=om.BSplineCurve(num_control=n_cp, order=min(n_cp, 4), x_start=x_start, x_end=x_end),
+        x_interp=x_interp,
+        splines=[om.SplineSpec(control_name=holder_out, interp_name=interp_name, units=units)],
+        promotes_outputs=[interp_name],
+    )
+    return om.Group(
+        subsystems={"holder": holder, "spline": spline},
+        connections=[Connection(src=f"holder.{holder_out}", tgt=f"spline.{holder_out}")],
+        promotes_inputs=promotes_inputs,
+        promotes_outputs=promotes_outputs,
+    )
+
+
 def vlm_system_size(surfaces) -> int:
     """Total number of VLM panels, sum of (nx - 1) * (ny - 1) over the surfaces."""
     return sum((s["mesh"].shape[0] - 1) * (s["mesh"].shape[1] - 1) for s in surfaces)

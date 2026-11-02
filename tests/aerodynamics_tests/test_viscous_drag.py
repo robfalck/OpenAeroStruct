@@ -5,7 +5,7 @@ import numpy as np
 import om4.api as om
 
 from openaerostruct.aerodynamics.viscous_drag import ViscousDrag
-from openaerostruct.utils.bspline_comp import BsplineComp
+from openaerostruct.utils.om4_utils import spline_or_broadcast
 from openaerostruct.utils.testing import run_test, get_default_surfaces
 
 
@@ -16,13 +16,13 @@ def _viscous_group(surface):
     x_interp = np.linspace(0.0, 1.0, int(ny - 1))
     return om.Group(
         subsystems={
-            "t_over_c_bsp": BsplineComp(
-                num_cp=n_cp,
+            "t_over_c_bsp": spline_or_broadcast(
+                n_cp=n_cp,
                 x_interp=x_interp,
-                order=min(n_cp, 4),
-                cp_name="t_over_c_cp",
+                control_name="t_over_c_cp",
                 interp_name="t_over_c",
-                cp_val=surface["t_over_c_cp"],
+                units=None,
+                control_val=np.asarray(surface["t_over_c_cp"], dtype=float),
                 promotes_inputs=["t_over_c_cp"],
                 promotes_outputs=["t_over_c"],
             ),

@@ -9,9 +9,8 @@ from om4.core.system import System
 from om4.utils.polymorphic import Polymorphic
 
 from openaerostruct.geometry.geometry_mesh import GeometryMesh
-from openaerostruct.utils.bspline_comp import BsplineComp
 from openaerostruct.utils.interpolation import get_normalized_span_coords
-from openaerostruct.utils.om4_utils import field_values
+from openaerostruct.utils.om4_utils import field_values, spline_or_broadcast
 from openaerostruct.utils.surface import Surface
 
 
@@ -58,19 +57,16 @@ def _geometry_kwargs(surface: Surface) -> dict:
         n_cp = len(surface[cp_key])
         x_cp_start, x_cp_end = x_cp_range if x_cp_range else (None, None)
         is_dv = surface.get(f"{cp_key}_dv", True)
-        # om4 ignores InputDefault.val (ai/OM4_NEEDS.md B-005), so the component default must
-        # carry the value too. Without the default, OM3 fell back to the spline's ones.
         cp_val = np.asarray(surface[cp_key], dtype=float) if is_dv else None
-        subs[f"{name}_bsp"] = BsplineComp(
-            num_cp=n_cp,
+        subs[f"{name}_bsp"] = spline_or_broadcast(
+            n_cp=n_cp,
             x_interp=get_normalized_span_coords(surface, mid_panel=mid_panel),
-            order=min(n_cp, 4),
-            x_cp_start=x_cp_start,
-            x_cp_end=x_cp_end,
-            cp_name=cp_key,
+            control_name=cp_key,
             interp_name=name,
             units=units,
-            cp_val=cp_val,
+            control_val=cp_val,
+            x_start=x_cp_start,
+            x_end=x_cp_end,
             promotes_inputs=[cp_key],
             promotes_outputs=[name],
         )

@@ -1,6 +1,6 @@
 import unittest
 import numpy as np
-from openaerostruct.utils.bspline_comp import BsplineComp
+from openaerostruct.utils.om4_utils import spline_or_broadcast
 from openaerostruct.structures.section_properties_wingbox import SectionPropertiesWingbox
 from openaerostruct.utils.testing import run_test, get_default_surfaces
 import om4.api as om
@@ -496,13 +496,13 @@ class Test(unittest.TestCase):
         ]
         x_interp = np.linspace(0.0, 1.0, int(ny - 1))
         subsystems = {
-            interp_name: BsplineComp(
-                num_cp=n_cp,
+            interp_name: spline_or_broadcast(
+                n_cp=n_cp,
                 x_interp=x_interp,
-                order=min(n_cp, 4),
-                cp_name=cp_name,
+                control_name=cp_name,
                 interp_name=interp_name,
                 units=units,
+                control_val=None,
                 promotes_inputs=[cp_name],
                 promotes_outputs=[interp_name],
             )
@@ -791,13 +791,13 @@ class Test(unittest.TestCase):
         ]
         x_interp = np.linspace(0.0, 1.0, int(ny - 1))
         subsystems = {
-            interp_name: BsplineComp(
-                num_cp=n_cp,
+            interp_name: spline_or_broadcast(
+                n_cp=n_cp,
                 x_interp=x_interp,
-                order=min(n_cp, 4),
-                cp_name=cp_name,
+                control_name=cp_name,
                 interp_name=interp_name,
                 units=units,
+                control_val=None,
                 promotes_inputs=[cp_name],
                 promotes_outputs=[interp_name],
             )
