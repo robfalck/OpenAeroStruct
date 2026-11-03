@@ -1,5 +1,14 @@
-from openmdao.utils.assert_utils import assert_check_partials
+import numpy as np
 import unittest
+
+from openaerostruct.meshing.mesh_generator import generate_mesh
+from openaerostruct.integration.aerostruct_groups import AerostructGeometry, AerostructPoint
+from openaerostruct.utils.constants import grav_constant
+
+import om4.api as om
+from om4.variables.design_var import DesignVar
+from om4.variables.response import Constraint, Objective
+from om4.transforms.transform import AffineTransform
 
 
 """
@@ -7,20 +16,16 @@ This is not a physically meaningful case, in that it is not set up to give
 the correct results or with the correct coupled physics between the two points.
 Instead, this is simply testing the morphing aspect of the code using a
 multipoint aerostruct formulation.
+
+Each flight point gets its own top-level AerostructGeometry/AerostructPoint pair
+(connect_geom_DVs=False) so the wing can morph independently between points; the
+twist and thickness control points are per-point design variables, set directly on
+each point's unpromoted path rather than through a shared IndepVarComp.
 """
 
 
 class Test(unittest.TestCase):
     def test(self):
-        import numpy as np
-
-        from openaerostruct.meshing.mesh_generator import generate_mesh
-        from openaerostruct.integration.aerostruct_groups import AerostructGeometry, AerostructPoint
-        from openaerostruct.utils.constants import grav_constant
-
-        import openmdao.api as om
-
-        # Create a dictionary to store options about the surface
         mesh_dict = {"num_y": 11, "num_x": 2, "wing_type": "CRM", "symmetry": True, "num_twist_cp": 5}
 
         mesh, twist_cp = generate_mesh(mesh_dict)
@@ -66,123 +71,121 @@ class Test(unittest.TestCase):
             "exact_failure_constraint": False,  # if false, use KS function
         }
 
-        # Create the problem and assign the model group
-        prob = om.Problem()
+        name = "wing"
+        n_points = 2
 
-        # Add problem information as an independent variables component
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("v", val=[248.136, 0.5 * 340.0], units="m/s")
-        indep_var_comp.add_output("alpha", val=[5.0, 10.0], units="deg")
-        indep_var_comp.add_output("Mach_number", val=[0.84, 0.5])
-        indep_var_comp.add_output("re", val=[1.0e6, 0.5e6], units="1/m")
-        indep_var_comp.add_output("rho", val=[0.38, 0.764], units="kg/m**3")
-        indep_var_comp.add_output("CT", val=grav_constant * 17.0e-6, units="1/s")
-        indep_var_comp.add_output("R", val=11.165e6, units="m")
-        indep_var_comp.add_output("W0", val=0.4 * 3e5, units="kg")
-        indep_var_comp.add_output("speed_of_sound", val=295.4, units="m/s")
-        indep_var_comp.add_output("load_factor", val=[1.0, 2.5])
-        indep_var_comp.add_output("empty_cg", val=np.zeros((3)), units="m")
+        # Per-point flow conditions (these differ between points, unlike OM3's shared,
+        # sliced IndepVarComp vectors).
+        v = [248.136, 0.5 * 340.0]
+        alpha = [5.0, 10.0]
+        mach_number = [0.84, 0.5]
+        re = [1.0e6, 0.5e6]
+        rho = [0.38, 0.764]
+        load_factor = [1.0, 2.5]
+        twist_cp_pts = [
+            np.array([2.0, 3.0, 4.0, 4.0, 4.0]),
+            np.array([4.0, 4.0, 4.0, 5.0, 6.0]),
+        ]
 
-        prob.model.add_subsystem("prob_vars", indep_var_comp, promotes=["*"])
+        subsystems = {}
+        connections = []
+        design_vars = {}
+        constraints = {}
 
-        # Add morphing variables as an independent variables component
-        morphing_vars = om.IndepVarComp()
-        morphing_vars.add_output("t_over_c_cp", val=np.array([0.15]))
-        morphing_vars.add_output("thickness_cp", val=np.array([0.01, 0.01, 0.01]), units="m")
-        morphing_vars.add_output("twist_cp_0", val=np.array([2.0, 3.0, 4.0, 4.0, 4.0]), units="deg")
-        morphing_vars.add_output("twist_cp_1", val=np.array([4.0, 4.0, 4.0, 5.0, 6.0]), units="deg")
+        for i in range(n_points):
+            geom_name = "wing_point{}".format(i)
+            point_name = "AS_point_{}".format(i)
 
-        prob.model.add_subsystem("morphing_vars", morphing_vars, promotes=["*"])
+            subsystems[geom_name] = AerostructGeometry(surface=surface, connect_geom_DVs=False)
 
-        # Connect geometric design variables to each point
-        prob.model.connect("t_over_c_cp", "AS_point_0.wing.geometry.t_over_c_cp")
-        prob.model.connect("t_over_c_cp", "AS_point_1.wing.geometry.t_over_c_cp")
+            subsystems[point_name] = AerostructPoint(
+                surfaces=[surface],
+                promotes_inputs=["CT", "R", "W0", "speed_of_sound", "empty_cg"],
+            )
 
-        prob.model.connect("thickness_cp", "AS_point_0.wing.tube_group.thickness_cp")
-        prob.model.connect("thickness_cp", "AS_point_1.wing.tube_group.thickness_cp")
+            com_name = point_name + "." + name + "_perf"
+            connections += [
+                om.Connection(
+                    src=geom_name + ".local_stiff_transformed",
+                    tgt=point_name + ".coupled." + name + ".local_stiff_transformed",
+                ),
+                om.Connection(src=geom_name + ".nodes", tgt=point_name + ".coupled." + name + ".nodes"),
+                # Connect aerodyamic mesh to coupled group mesh
+                om.Connection(src=geom_name + ".mesh", tgt=point_name + ".coupled." + name + ".mesh"),
+                # Connect performance calculation variables
+                om.Connection(src=geom_name + ".radius", tgt=com_name + ".radius"),
+                om.Connection(src=geom_name + ".thickness", tgt=com_name + ".thickness"),
+                om.Connection(src=geom_name + ".nodes", tgt=com_name + ".nodes"),
+                om.Connection(src=geom_name + ".cg_location", tgt=point_name + ".total_perf." + name + "_cg_location"),
+                om.Connection(
+                    src=geom_name + ".structural_mass", tgt=point_name + ".total_perf." + name + "_structural_mass"
+                ),
+                # With connect_geom_DVs=False, the geometry subsystem's t_over_c output is not
+                # auto-wired to tube_group's t_over_c input via shared promotion, so wire both
+                # consumers explicitly. tube_group's t_over_c (fed by radius_comp) is itself
+                # promoted all the way up to the geometry group's own boundary.
+                om.Connection(src=geom_name + ".geometry.t_over_c", tgt=geom_name + ".t_over_c"),
+                om.Connection(src=geom_name + ".geometry.t_over_c", tgt=com_name + ".t_over_c"),
+            ]
 
-        prob.model.connect("twist_cp_0", "AS_point_0.wing.geometry.twist_cp")
-        prob.model.connect("twist_cp_1", "AS_point_1.wing.geometry.twist_cp")
+            design_vars[geom_name + ".geometry.twist_cp"] = DesignVar(lower=-10.0, upper=15.0)
+            design_vars[geom_name + ".tube_group.thickness_cp"] = DesignVar(
+                lower=0.01, upper=0.5, transform=AffineTransform.from_scaler_adder(scaler=1e2)
+            )
+            design_vars[point_name + ".alpha"] = DesignVar(lower=-15.0, upper=15.0)
 
-        for point in range(2):
-            name = "wing"
+            constraints[point_name + "." + name + "_perf.failure"] = Constraint(upper=0.0)
+            constraints[point_name + "." + name + "_perf.thickness_intersects"] = Constraint(upper=0.0)
+            constraints[point_name + ".L_equals_W"] = Constraint(equals=0.0)
 
-            point_name = "AS_point_{}".format(point)
+        prob = om.Problem(
+            model=om.Group(
+                subsystems=subsystems,
+                connections=connections,
+                design_vars=design_vars,
+                constraints=constraints,
+                objectives={
+                    "AS_point_0.fuelburn": Objective(transform=AffineTransform.from_scaler_adder(scaler=1e-5))
+                },
+                optimizer=om.ScipyMinimizeOptimizer(optimizer="SLSQP", tol=1e-9, maxiter=2),
+            )
+        )
 
-            # Create the aero point group and add it to the model
-            AS_point = AerostructPoint(surfaces=[surface])
+        # Shared scalar flow/mass properties, common to both points.
+        prob.set_val("CT", grav_constant * 17.0e-6, units="1/s")
+        prob.set_val("R", 11.165e6, units="m")
+        prob.set_val("W0", 0.4 * 3e5, units="kg")
+        prob.set_val("speed_of_sound", 295.4, units="m/s")
+        prob.set_val("empty_cg", np.zeros((3)), units="m")
 
-            prob.model.add_subsystem(point_name, AS_point)
+        for i in range(n_points):
+            geom_name = "wing_point{}".format(i)
+            point_name = "AS_point_{}".format(i)
 
-            aerostruct_group = AerostructGeometry(surface=surface, connect_geom_DVs=False)
-            AS_point.add_subsystem(name, aerostruct_group)
+            prob.set_val(point_name + ".v", v[i], units="m/s")
+            prob.set_val(point_name + ".alpha", alpha[i], units="deg")
+            prob.set_val(point_name + ".Mach_number", mach_number[i])
+            prob.set_val(point_name + ".re", re[i], units="1/m")
+            prob.set_val(point_name + ".rho", rho[i], units="kg/m**3")
+            prob.set_val(point_name + ".load_factor", load_factor[i])
 
-            # Connect flow properties to the analysis point
-            prob.model.connect("alpha", point_name + ".alpha", src_indices=[point])
-            prob.model.connect("v", point_name + ".v", src_indices=[point])
-            prob.model.connect("Mach_number", point_name + ".Mach_number", src_indices=[point])
-            prob.model.connect("re", point_name + ".re", src_indices=[point])
-            prob.model.connect("rho", point_name + ".rho", src_indices=[point])
-            prob.model.connect("CT", point_name + ".CT")
-            prob.model.connect("R", point_name + ".R")
-            prob.model.connect("W0", point_name + ".W0")
-            prob.model.connect("speed_of_sound", point_name + ".speed_of_sound")
-            prob.model.connect("empty_cg", point_name + ".empty_cg")
-            prob.model.connect("load_factor", point_name + ".load_factor", src_indices=[point])
-
-            AS_point.connect(name + ".local_stiff_transformed", "coupled." + name + ".local_stiff_transformed")
-            AS_point.connect(name + ".nodes", "coupled." + name + ".nodes")
-
-            # Connect aerodyamic mesh to coupled group mesh
-            AS_point.connect(name + ".mesh", "coupled." + name + ".mesh")
-
-            # Connect performance calculation variables
-            AS_point.connect(name + ".radius", name + "_perf" + ".radius")
-            AS_point.connect(name + ".thickness", name + "_perf" + ".thickness")
-            AS_point.connect(name + ".nodes", name + "_perf" + ".nodes")
-            AS_point.connect(name + ".cg_location", "total_perf." + name + "_cg_location")
-            AS_point.connect(name + ".structural_mass", "total_perf." + name + "_structural_mass")
-            AS_point.connect(name + ".geometry.t_over_c", name + "_perf" + ".t_over_c")
-            AS_point.connect(name + ".geometry.t_over_c", name + ".t_over_c")
-
-        prob.driver = om.ScipyOptimizeDriver()
-        prob.driver.options["tol"] = 1e-9
-        prob.driver.options["maxiter"] = 2
-
-        # Setup problem and add design variables, constraint, and objective
-        prob.model.add_design_var("twist_cp_0", lower=-10.0, upper=15.0)
-        prob.model.add_design_var("twist_cp_1", lower=-10.0, upper=15.0)
-        prob.model.add_design_var("thickness_cp", lower=0.01, upper=0.5, scaler=1e2)
-        prob.model.add_constraint("AS_point_0.wing_perf.failure", upper=0.0)
-        prob.model.add_constraint("AS_point_0.wing_perf.thickness_intersects", upper=0.0)
-        prob.model.add_constraint("AS_point_1.wing_perf.failure", upper=0.0)
-        prob.model.add_constraint("AS_point_1.wing_perf.thickness_intersects", upper=0.0)
-
-        # Add design variables, constraisnt, and objective on the problem
-        prob.model.add_design_var("alpha", lower=-15.0, upper=15.0)
-        prob.model.add_constraint("AS_point_0.L_equals_W", equals=0.0)
-        prob.model.add_constraint("AS_point_1.L_equals_W", equals=0.0)
-        prob.model.add_objective("AS_point_0.fuelburn", scaler=1e-5)
-
-        # Set up the problem
-        prob.setup(check=True)
-
-        # om.view_model(prob)
+            prob.set_val(geom_name + ".geometry.t_over_c_cp", np.array([0.15]))
+            prob.set_val(geom_name + ".tube_group.thickness_cp", np.array([0.01, 0.01, 0.01]), units="m")
+            prob.set_val(geom_name + ".geometry.twist_cp", twist_cp_pts[i], units="deg")
 
         prob.run_model()
 
         # Check the partials at the initial point in the design space,
         # only care about relative error
-        data = prob.check_partials(compact_print=True, out_stream=None, method="cs", step=1e-40)
-
-        assert_check_partials(data, atol=1e20, rtol=1e-6)
+        data = prob.check_partials(differentiator="cs", only_incorrect=True, atol=1e20, rtol=1e-6)
+        assert not data, {c: {k: (v["abs_error"], v["rel_error"]) for k, v in d.items()} for c, d in data.items()}
 
         # Run the optimizer for 2 iterations
-        prob.run_driver()
+        prob.run_optimizer()
 
         # Check the partials at this point in the design space
-        data = prob.check_partials(compact_print=True, out_stream=None, method="cs", step=1e-40)
-        assert_check_partials(data, atol=1e20, rtol=1e-6)
+        data = prob.check_partials(differentiator="cs", only_incorrect=True, atol=1e20, rtol=1e-6)
+        assert not data, {c: {k: (v["abs_error"], v["rel_error"]) for k, v in d.items()} for c, d in data.items()}
 
 
 if __name__ == "__main__":

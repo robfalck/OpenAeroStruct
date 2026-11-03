@@ -15,7 +15,7 @@ step; **Low** = tidiness.
 | TD-003 | FFD geometry (`ffd_component.py`, `DVGeo` option) | Low | `DVGeo` is a live pygeo object and can't be a serializable field. Needs a design for referencing external geometry engines |
 | TD-004 | `mphys/` | Low | mphys is built on OM3 |
 | TD-005 | `plot_wing` / `plot_wingbox` | Low | Need optimizer-iteration recording, which om4 lacks |
-| TD-006 | Aerostructural integration tests (the groups `AerostructGeometry`, `CoupledAS`, `CoupledPerformance`, `AerostructPoint` are ported; only `test_aerostruct_analysis.py` is) | Medium | Remaining `test_aerostruct*`, `test_v1_aerostruct_*`, `test_wingbox_derivs/distributed_fuel`, `test_multipoint_*`, `test_morphing_*`, `test_scaneagle`, `test_simple_rect_AS` still use OM3 APIs |
+| ~~TD-006~~ | ~~Aerostructural integration tests (the groups `AerostructGeometry`, `CoupledAS`, `CoupledPerformance`, `AerostructPoint` are ported; only `test_aerostruct_analysis.py` is)~~ | Medium | **Resolved**: all in-scope files (`test_aerostruct*`, `test_v1_aerostruct_*`, `test_wingbox_derivs/distributed_fuel`, `test_multipoint_wingbox_*`, `test_morphing_aerostruct`, `test_scaneagle`, `test_simple_rect_AS`) are ported to om4's declarative API. `test_multipoint_parallel.py` (MPI-only) and tests blocked by TD-001/TD-002/TD-003/TD-004 remain out of scope |
 
 ## Deliberate deviations from OM3
 

@@ -1,4 +1,4 @@
-from openmdao.utils.assert_utils import assert_near_equal
+from om4.utils.assert_utils import assert_near_equal
 import unittest
 from openaerostruct.utils.testing import assert_opt_successful
 
@@ -12,7 +12,10 @@ class Test(unittest.TestCase):
         from openaerostruct.integration.aerostruct_groups import AerostructGeometry, AerostructPoint
         from openaerostruct.utils.constants import grav_constant
 
-        import openmdao.api as om
+        import om4.api as om
+        from om4.variables.design_var import DesignVar
+        from om4.variables.response import Constraint, Objective
+        from om4.transforms.transform import AffineTransform
 
         # Create a dictionary to store options about the surface
         mesh_dict = {"num_y": 5, "num_x": 2, "wing_type": "CRM", "symmetry": True, "num_twist_cp": 5}
@@ -60,40 +63,14 @@ class Test(unittest.TestCase):
             "exact_failure_constraint": False,  # if false, use KS function
         }
 
-        # Create the problem and assign the model group
-        prob = om.Problem()
-
-        # Add problem information as an independent variables component
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("v", val=248.136, units="m/s")
-        indep_var_comp.add_output("alpha", val=5.0, units="deg")
-        indep_var_comp.add_output("Mach_number", val=0.84)
-        indep_var_comp.add_output("re", val=1.0e6, units="1/m")
-        indep_var_comp.add_output("rho", val=0.38, units="kg/m**3")
-        indep_var_comp.add_output("CT", val=grav_constant * 17.0e-6, units="1/s")
-        indep_var_comp.add_output("R", val=11.165e6, units="m")
-        indep_var_comp.add_output("W0", val=0.4 * 3e5, units="kg")
-        indep_var_comp.add_output("speed_of_sound", val=295.4, units="m/s")
-        indep_var_comp.add_output("load_factor", val=1.0)
-        indep_var_comp.add_output("empty_cg", val=np.zeros((3)), units="m")
-
-        prob.model.add_subsystem("prob_vars", indep_var_comp, promotes=["*"])
+        name = "wing"
+        point_name = "AS_point_0"
 
         aerostruct_group = AerostructGeometry(surface=surface)
 
-        name = "wing"
-
-        # Add tmp_group to the problem with the name of the surface.
-        prob.model.add_subsystem(name, aerostruct_group)
-
-        point_name = "AS_point_0"
-
         # Create the aero point group and add it to the model
-        AS_point = AerostructPoint(surfaces=[surface])
-
-        prob.model.add_subsystem(
-            point_name,
-            AS_point,
+        AS_point = AerostructPoint(
+            surfaces=[surface],
             promotes_inputs=[
                 "v",
                 "alpha",
@@ -110,48 +87,68 @@ class Test(unittest.TestCase):
         )
 
         com_name = point_name + "." + name + "_perf"
-        prob.model.connect(
-            name + ".local_stiff_transformed", point_name + ".coupled." + name + ".local_stiff_transformed"
+        connections = [
+            om.Connection(
+                src=name + ".local_stiff_transformed", tgt=point_name + ".coupled." + name + ".local_stiff_transformed"
+            ),
+            om.Connection(src=name + ".nodes", tgt=point_name + ".coupled." + name + ".nodes"),
+            # Connect aerodyamic mesh to coupled group mesh
+            om.Connection(src=name + ".mesh", tgt=point_name + ".coupled." + name + ".mesh"),
+            # Connect performance calculation variables
+            om.Connection(src=name + ".radius", tgt=com_name + ".radius"),
+            om.Connection(src=name + ".thickness", tgt=com_name + ".thickness"),
+            om.Connection(src=name + ".nodes", tgt=com_name + ".nodes"),
+            om.Connection(src=name + ".cg_location", tgt=point_name + "." + "total_perf." + name + "_cg_location"),
+            om.Connection(
+                src=name + ".structural_mass", tgt=point_name + "." + "total_perf." + name + "_structural_mass"
+            ),
+            om.Connection(src=name + ".t_over_c", tgt=com_name + ".t_over_c"),
+        ]
+
+        # Set up the problem and add design variables, constraint, and objective
+        prob = om.Problem(
+            model=om.Group(
+                subsystems={name: aerostruct_group, point_name: AS_point},
+                connections=connections,
+                design_vars={
+                    "wing.twist_cp": DesignVar(lower=-10.0, upper=15.0),
+                    "wing.thickness_cp": DesignVar(
+                        lower=0.01, upper=0.5, transform=AffineTransform.from_scaler_adder(scaler=1e2)
+                    ),
+                    "alpha": DesignVar(lower=-10.0, upper=10.0),
+                },
+                constraints={
+                    "AS_point_0.wing_perf.failure": Constraint(upper=0.0),
+                    "AS_point_0.wing_perf.thickness_intersects": Constraint(upper=0.0),
+                    "AS_point_0.L_equals_W": Constraint(equals=0.0),
+                },
+                objectives={
+                    "AS_point_0.fuelburn": Objective(transform=AffineTransform.from_scaler_adder(scaler=1e-5)),
+                },
+                optimizer=om.ScipyMinimizeOptimizer(tol=1e-9, optimizer="SLSQP"),
+            )
         )
-        prob.model.connect(name + ".nodes", point_name + ".coupled." + name + ".nodes")
+        prob.set_val("v", 248.136, units="m/s")
+        prob.set_val("alpha", 5.0, units="deg")
+        prob.set_val("Mach_number", 0.84)
+        prob.set_val("re", 1.0e6, units="1/m")
+        prob.set_val("rho", 0.38, units="kg/m**3")
+        prob.set_val("CT", grav_constant * 17.0e-6, units="1/s")
+        prob.set_val("R", 11.165e6, units="m")
+        prob.set_val("W0", 0.4 * 3e5, units="kg")
+        prob.set_val("speed_of_sound", 295.4, units="m/s")
+        prob.set_val("load_factor", 1.0)
+        prob.set_val("empty_cg", np.zeros((3)), units="m")
 
-        # Connect aerodyamic mesh to coupled group mesh
-        prob.model.connect(name + ".mesh", point_name + ".coupled." + name + ".mesh")
-
-        # Connect performance calculation variables
-        prob.model.connect(name + ".radius", com_name + ".radius")
-        prob.model.connect(name + ".thickness", com_name + ".thickness")
-        prob.model.connect(name + ".nodes", com_name + ".nodes")
-        prob.model.connect(name + ".cg_location", point_name + "." + "total_perf." + name + "_cg_location")
-        prob.model.connect(name + ".structural_mass", point_name + "." + "total_perf." + name + "_structural_mass")
-        prob.model.connect(name + ".t_over_c", com_name + ".t_over_c")
-
-        prob.driver = om.ScipyOptimizeDriver()
-        prob.driver.options["tol"] = 1e-9
-
-        # Setup problem and add design variables, constraint, and objective
-        prob.model.add_design_var("wing.twist_cp", lower=-10.0, upper=15.0)
-        prob.model.add_design_var("wing.thickness_cp", lower=0.01, upper=0.5, scaler=1e2)
-        prob.model.add_constraint("AS_point_0.wing_perf.failure", upper=0.0)
-        prob.model.add_constraint("AS_point_0.wing_perf.thickness_intersects", upper=0.0)
-
-        # Add design variables, constraisnt, and objective on the problem
-        prob.model.add_design_var("alpha", lower=-10.0, upper=10.0)
-        prob.model.add_constraint("AS_point_0.L_equals_W", equals=0.0)
-        prob.model.add_objective("AS_point_0.fuelburn", scaler=1e-5)
-
-        # Set up the problem
-        prob.setup(check=True)
-
-        optResult = prob.run_driver()
+        optResult = prob.run_optimizer()
         # docs checkpoint 1
 
         # Inserting a small unit test here. Verify that beta is correctly promoted in an Aerostruct
         # group.
-        assert_near_equal(prob["AS_point_0.beta"], 0.0)
+        assert_near_equal(prob.get_val("AS_point_0.beta"), 0.0)
         assert_opt_successful(self, optResult)
 
-        assert_near_equal(prob["AS_point_0.fuelburn"][0], 92523.9636052887, 1e-8)
+        assert_near_equal(prob.get_val("AS_point_0.fuelburn")[0], 92523.9636052887, 1e-8)
 
 
 if __name__ == "__main__":

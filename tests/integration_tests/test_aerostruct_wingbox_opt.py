@@ -1,12 +1,14 @@
-from openmdao.utils.assert_utils import assert_near_equal
+import om4.api as om
+from om4.variables.design_var import DesignVar
+from om4.variables.response import Constraint, Objective
+from om4.transforms.transform import AffineTransform
+from om4.utils.assert_utils import assert_near_equal
 import unittest
 import numpy as np
 
 from openaerostruct.meshing.mesh_generator import generate_mesh
 
 from openaerostruct.integration.aerostruct_groups import AerostructGeometry, AerostructPoint
-
-import openmdao.api as om
 
 
 # Provide coordinates for a portion of an airfoil for the wingbox cross-section as an nparray with dtype=complex (to work with the complex-step approximation for derivatives).
@@ -304,23 +306,8 @@ class Test(unittest.TestCase):
         surfaces = [surf_dict]
 
         # Create the problem and assign the model group
-        prob = om.Problem()
-
-        # Add problem information as an independent variables component
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("v", val=0.85 * 295.07, units="m/s")
-        indep_var_comp.add_output("alpha", val=0.0, units="deg")
-        indep_var_comp.add_output("Mach_number", val=0.85)
-        indep_var_comp.add_output("re", val=0.348 * 295.07 * 0.85 * 1.0 / (1.43 * 1e-5), units="1/m")
-        indep_var_comp.add_output("rho", val=0.348, units="kg/m**3")
-        indep_var_comp.add_output("CT", val=0.53 / 3600, units="1/s")
-        indep_var_comp.add_output("R", val=14.307e6, units="m")
-        indep_var_comp.add_output("W0", val=148000 + surf_dict["Wf_reserve"], units="kg")
-        indep_var_comp.add_output("speed_of_sound", val=295.07, units="m/s")
-        indep_var_comp.add_output("load_factor", val=1.0)
-        indep_var_comp.add_output("empty_cg", val=np.zeros((3)), units="m")
-
-        prob.model.add_subsystem("prob_vars", indep_var_comp, promotes=["*"])
+        subsystems = {}
+        connections = []
 
         # Loop over each surface in the surfaces list
         for surface in surfaces:
@@ -331,7 +318,7 @@ class Test(unittest.TestCase):
             aerostruct_group = AerostructGeometry(surface=surface)
 
             # Add tmp_group to the problem with the name of the surface.
-            prob.model.add_subsystem(name, aerostruct_group)
+            subsystems[name] = aerostruct_group
 
         # Loop through and add a certain number of aero points
         for i in range(1):
@@ -339,74 +326,114 @@ class Test(unittest.TestCase):
             # Connect the parameters within the model for each aero point
 
             # Create the aero point group and add it to the model
-            AS_point = AerostructPoint(surfaces=surfaces)
+            AS_point = AerostructPoint(
+                surfaces=surfaces,
+                promotes_inputs=[
+                    "v",
+                    "alpha",
+                    "Mach_number",
+                    "re",
+                    "rho",
+                    "CT",
+                    "R",
+                    "W0",
+                    "speed_of_sound",
+                    "empty_cg",
+                    "load_factor",
+                ],
+            )
 
-            prob.model.add_subsystem(point_name, AS_point)
-
-            # Connect flow properties to the analysis point
-            prob.model.connect("v", point_name + ".v")
-            prob.model.connect("alpha", point_name + ".alpha")
-            prob.model.connect("Mach_number", point_name + ".Mach_number")
-            prob.model.connect("re", point_name + ".re")
-            prob.model.connect("rho", point_name + ".rho")
-            prob.model.connect("CT", point_name + ".CT")
-            prob.model.connect("R", point_name + ".R")
-            prob.model.connect("W0", point_name + ".W0")
-            prob.model.connect("speed_of_sound", point_name + ".speed_of_sound")
-            prob.model.connect("empty_cg", point_name + ".empty_cg")
-            prob.model.connect("load_factor", point_name + ".load_factor")
+            subsystems[point_name] = AS_point
 
             for _surface in surfaces:
                 com_name = point_name + "." + name + "_perf."
-                prob.model.connect(
-                    name + ".local_stiff_transformed", point_name + ".coupled." + name + ".local_stiff_transformed"
+                connections.append(
+                    om.Connection(
+                        src=name + ".local_stiff_transformed",
+                        tgt=point_name + ".coupled." + name + ".local_stiff_transformed",
+                    )
                 )
-                prob.model.connect(name + ".nodes", point_name + ".coupled." + name + ".nodes")
+                connections.append(om.Connection(src=name + ".nodes", tgt=point_name + ".coupled." + name + ".nodes"))
 
                 # Connect aerodyamic mesh to coupled group mesh
-                prob.model.connect(name + ".mesh", point_name + ".coupled." + name + ".mesh")
-                prob.model.connect(name + ".element_mass", point_name + ".coupled." + name + ".element_mass")
+                connections.append(om.Connection(src=name + ".mesh", tgt=point_name + ".coupled." + name + ".mesh"))
+                connections.append(
+                    om.Connection(src=name + ".element_mass", tgt=point_name + ".coupled." + name + ".element_mass")
+                )
 
                 # Connect performance calculation variables
-                prob.model.connect(name + ".nodes", com_name + "nodes")
-                prob.model.connect(name + ".cg_location", point_name + "." + "total_perf." + name + "_cg_location")
-                prob.model.connect(
-                    name + ".structural_mass", point_name + "." + "total_perf." + name + "_structural_mass"
+                connections.append(om.Connection(src=name + ".nodes", tgt=com_name + "nodes"))
+                connections.append(
+                    om.Connection(
+                        src=name + ".cg_location", tgt=point_name + "." + "total_perf." + name + "_cg_location"
+                    )
+                )
+                connections.append(
+                    om.Connection(
+                        src=name + ".structural_mass", tgt=point_name + "." + "total_perf." + name + "_structural_mass"
+                    )
                 )
 
                 # Connect wingbox properties to von Mises stress calcs
-                prob.model.connect(name + ".Qz", com_name + "Qz")
-                prob.model.connect(name + ".J", com_name + "J")
-                prob.model.connect(name + ".A_enc", com_name + "A_enc")
-                prob.model.connect(name + ".htop", com_name + "htop")
-                prob.model.connect(name + ".hbottom", com_name + "hbottom")
-                prob.model.connect(name + ".hfront", com_name + "hfront")
-                prob.model.connect(name + ".hrear", com_name + "hrear")
+                connections.append(om.Connection(src=name + ".Qz", tgt=com_name + "Qz"))
+                connections.append(om.Connection(src=name + ".J", tgt=com_name + "J"))
+                connections.append(om.Connection(src=name + ".A_enc", tgt=com_name + "A_enc"))
+                connections.append(om.Connection(src=name + ".htop", tgt=com_name + "htop"))
+                connections.append(om.Connection(src=name + ".hbottom", tgt=com_name + "hbottom"))
+                connections.append(om.Connection(src=name + ".hfront", tgt=com_name + "hfront"))
+                connections.append(om.Connection(src=name + ".hrear", tgt=com_name + "hrear"))
 
-                prob.model.connect(name + ".spar_thickness", com_name + "spar_thickness")
-                prob.model.connect(name + ".t_over_c", com_name + "t_over_c")
+                connections.append(om.Connection(src=name + ".spar_thickness", tgt=com_name + "spar_thickness"))
+                connections.append(om.Connection(src=name + ".t_over_c", tgt=com_name + "t_over_c"))
 
-        prob.driver = om.ScipyOptimizeDriver()
-        prob.driver.options["tol"] = 1e-9
+        # Set up the problem and add design variables, constraint, and objective
+        prob = om.Problem(
+            model=om.Group(
+                subsystems=subsystems,
+                connections=connections,
+                design_vars={
+                    "wing.twist_cp": DesignVar(
+                        lower=-15.0, upper=15.0, transform=AffineTransform.from_scaler_adder(scaler=0.1)
+                    ),
+                    "wing.spar_thickness_cp": DesignVar(
+                        lower=0.003, upper=0.1, transform=AffineTransform.from_scaler_adder(scaler=1e2)
+                    ),
+                    "wing.skin_thickness_cp": DesignVar(
+                        lower=0.003, upper=0.1, transform=AffineTransform.from_scaler_adder(scaler=1e2)
+                    ),
+                    "wing.geometry.t_over_c_cp": DesignVar(
+                        lower=0.07, upper=0.2, transform=AffineTransform.from_scaler_adder(scaler=10.0)
+                    ),
+                    "wing.geometry.span": DesignVar(
+                        lower=55.0, upper=60.0, transform=AffineTransform.from_scaler_adder(scaler=2e-2)
+                    ),
+                },
+                constraints={
+                    "AS_point_0.CL": Constraint(equals=0.5),
+                    "AS_point_0.wing_perf.failure": Constraint(upper=0.0),
+                },
+                objectives={
+                    "AS_point_0.fuelburn": Objective(transform=AffineTransform.from_scaler_adder(scaler=1e-5)),
+                },
+                optimizer=om.ScipyMinimizeOptimizer(tol=1e-9, optimizer="SLSQP"),
+            )
+        )
+        prob.set_val("v", 0.85 * 295.07, units="m/s")
+        prob.set_val("alpha", 0.0, units="deg")
+        prob.set_val("Mach_number", 0.85)
+        prob.set_val("re", 0.348 * 295.07 * 0.85 * 1.0 / (1.43 * 1e-5), units="1/m")
+        prob.set_val("rho", 0.348, units="kg/m**3")
+        prob.set_val("CT", 0.53 / 3600, units="1/s")
+        prob.set_val("R", 14.307e6, units="m")
+        prob.set_val("W0", 148000 + surf_dict["Wf_reserve"], units="kg")
+        prob.set_val("speed_of_sound", 295.07, units="m/s")
+        prob.set_val("load_factor", 1.0)
+        prob.set_val("empty_cg", np.zeros((3)), units="m")
 
-        prob.model.add_objective("AS_point_0.fuelburn", scaler=1e-5)
-
-        prob.model.add_design_var("wing.twist_cp", lower=-15.0, upper=15.0, scaler=0.1)
-        prob.model.add_design_var("wing.spar_thickness_cp", lower=0.003, upper=0.1, scaler=1e2)
-        prob.model.add_design_var("wing.skin_thickness_cp", lower=0.003, upper=0.1, scaler=1e2)
-        prob.model.add_design_var("wing.geometry.t_over_c_cp", lower=0.07, upper=0.2, scaler=10.0)
-        prob.model.add_design_var("wing.geometry.span", lower=55.0, upper=60.0, scaler=2e-2)
-
-        prob.model.add_constraint("AS_point_0.CL", equals=0.5)
-        prob.model.add_constraint("AS_point_0.wing_perf.failure", upper=0.0)
-
-        # Set up the problem
-        prob.setup()
-
-        prob.run_driver()
-        assert_near_equal(prob["AS_point_0.fuelburn"][0], 79151.03928720397, 1e-5)
-        assert_near_equal(prob["wing.structural_mass"][0] / 1.25, 13388.445732877735, 1e-5)
-        assert_near_equal(prob["wing.geometry.span"][0], 60.0, 1e-5)
+        prob.run_optimizer()
+        assert_near_equal(prob.get_val("AS_point_0.fuelburn")[0], 79151.03928720397, 1e-5)
+        assert_near_equal(prob.get_val("wing.structural_mass")[0] / 1.25, 13388.445732877735, 1e-5)
+        assert_near_equal(prob.get_val("wing.geometry.span")[0], 60.0, 1e-5)
 
 
 if __name__ == "__main__":
