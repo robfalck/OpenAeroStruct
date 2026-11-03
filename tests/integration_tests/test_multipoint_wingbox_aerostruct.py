@@ -461,8 +461,13 @@ class Test(unittest.TestCase):
         prob.set_val("AS_point_0.coupled.load_factor", 1.0)
         prob.set_val("AS_point_1.coupled.load_factor", 2.5)
 
-        # Converge the coupled nonlinear solver before optimizing; without this, the optimizer's
-        # first derivative evaluation can hit a singular LSQ subproblem matrix.
+        # run_optimizer() already converges the coupled solver and computes correct gradients on
+        # its own first evaluation (verified: the om4 objective gradient/constraint Jacobian here
+        # differ from a twice-converged state only at machine precision). But scipy's SLSQP is
+        # numerically fragile at this particular design point: with only one prior convergence
+        # pass it reports "Singular matrix C in LSQ subproblem" on its first iteration, while the
+        # slightly tighter state produced by converging once more here avoids it. This works
+        # around a SLSQP sensitivity, not an incorrect derivative.
         prob.run_model()
 
         optResult = prob.run_optimizer()
