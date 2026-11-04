@@ -116,9 +116,11 @@ openaerostruct = { path = ".", editable = true }
 om4 = { path = "../om4.git", editable = true }
 # om4 dependencies not on conda-forge (or pinned there differently)
 nicegui = "*"
-jax = "*"
-jaxlib = "*"
-asdex = "*"
+# Pinned to match om4's own bounds (om4/pixi.toml): asdex relies on jax internals
+# that moved in 0.12, and asdex itself caps at 0.5.2.
+jax = "<0.12"
+jaxlib = "<0.12"
+asdex = "<=0.5.2"
 
 [environments]
 default = { features = ["py313", "dev", "opt", "uno", "petsc"] }

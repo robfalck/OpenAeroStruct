@@ -1,9 +1,21 @@
+from typing import Any
+
+import jax.numpy as jnp
 import numpy as np
+from pydantic import model_validator
 
-import openmdao.api as om
+from om4.components.jax_comps import JaxExplicitComp
+
+from openaerostruct.utils.om4_utils import VarDecl, field_values
+from openaerostruct.utils.surface import Surface
 
 
-class ScaleToPrandtlGlauert(om.ExplicitComponent):
+def _scale_last_axis(arr, factors):
+    """Multiply each of the 3 components along ``arr``'s last axis by its own factor."""
+    return jnp.stack([arr[..., i] * factors[i] for i in range(3)], axis=-1)
+
+
+class ScaleToPrandtlGlauert(JaxExplicitComp):
     """
     Scale the wind frame coordinates to get the Prandtl-Glauert transformed
     geometry.
@@ -73,15 +85,20 @@ class ScaleToPrandtlGlauert(om.ExplicitComponent):
         Velocity component at collocation points due to rotational velocity in PG frame.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
-        self.options.declare(
-            "rotational", False, types=bool, desc="Set to True to turn on support for computing angular velocities"
-        )
+    surfaces: list[Surface]
+    rotational: bool = False
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
-        rotational = self.options["rotational"]
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
+
+        surfaces = f["surfaces"]
+        rotational = f["rotational"]
 
         # Loop through all the surfaces to determine the total number
         # of evaluation points.
@@ -93,19 +110,19 @@ class ScaleToPrandtlGlauert(om.ExplicitComponent):
 
             num_eval_points += (nx - 1) * (ny - 1)
 
-        self.add_input("Mach_number", val=0.0, tags=["mphys_input"])
+        d.add_input("Mach_number", val=0.0, tags=["mphys_input"])
 
-        self.add_input("coll_pts_w_frame", shape=(num_eval_points, 3), units="m")
-        self.add_input("force_pts_w_frame", shape=(num_eval_points, 3), units="m")
-        self.add_input("bound_vecs_w_frame", shape=(num_eval_points, 3), units="m")
+        d.add_input("coll_pts_w_frame", shape=(num_eval_points, 3), units="m")
+        d.add_input("force_pts_w_frame", shape=(num_eval_points, 3), units="m")
+        d.add_input("bound_vecs_w_frame", shape=(num_eval_points, 3), units="m")
 
-        self.add_output("coll_pts_pg", shape=(num_eval_points, 3), units="m")
-        self.add_output("force_pts_pg", shape=(num_eval_points, 3), units="m")
-        self.add_output("bound_vecs_pg", shape=(num_eval_points, 3), units="m")
+        d.add_output("coll_pts_pg", shape=(num_eval_points, 3), units="m")
+        d.add_output("force_pts_pg", shape=(num_eval_points, 3), units="m")
+        d.add_output("bound_vecs_pg", shape=(num_eval_points, 3), units="m")
 
         if rotational:
-            self.add_input("rotational_velocities_w_frame", shape=(num_eval_points, 3), units="m/s")
-            self.add_output("rotational_velocities_pg", shape=(num_eval_points, 3), units="m/s")
+            d.add_input("rotational_velocities_w_frame", shape=(num_eval_points, 3), units="m/s")
+            d.add_output("rotational_velocities_pg", shape=(num_eval_points, 3), units="m/s")
 
         for surface in surfaces:
             mesh = surface["mesh"]
@@ -113,129 +130,40 @@ class ScaleToPrandtlGlauert(om.ExplicitComponent):
             ny = mesh.shape[1]
             name = surface["name"]
 
-            mesh_name = "{}_def_mesh_w_frame".format(name)
-            self.add_input(mesh_name, shape=(nx, ny, 3), units="m")
+            d.add_input(f"{name}_def_mesh_w_frame", shape=(nx, ny, 3), units="m")
+            d.add_input(f"{name}_normals_w_frame", shape=(nx - 1, ny - 1, 3))
 
-            normals_name = "{}_normals_w_frame".format(name)
-            self.add_input(normals_name, shape=(nx - 1, ny - 1, 3))
+            d.add_output(f"{name}_def_mesh_pg", shape=(nx, ny, 3), units="m")
+            d.add_output(f"{name}_normals_pg", shape=(nx - 1, ny - 1, 3))
 
-            mesh_name = "{}_def_mesh_pg".format(name)
-            self.add_output(mesh_name, shape=(nx, ny, 3), units="m")
+        # Derivatives are handled automatically by JaxExplicitComp (asdex-detected
+        # sparsity + autodiff), so no declare_partials calls are needed here.
+        return d.into(_spec)
 
-            normals_name = "{}_normals_pg".format(name)
-            self.add_output(normals_name, shape=(nx - 1, ny - 1, 3))
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None, statics=None):
+        M = inputs["Mach_number"]
+        betaPG = jnp.sqrt(1 - M**2)
 
-        # We'll compute all of sensitivities associated with Mach number through
-        # complex-step. Since it's a scalar this is pretty cheap.
-        self.declare_partials("*", "Mach_number", method="cs")
-        self.set_check_partial_options(wrt="Mach_number", method="fd", step=1e-8)
+        fact = (1.0, betaPG, betaPG)
+        outputs["bound_vecs_pg"] = _scale_last_axis(inputs["bound_vecs_w_frame"], fact)
+        outputs["coll_pts_pg"] = _scale_last_axis(inputs["coll_pts_w_frame"], fact)
+        outputs["force_pts_pg"] = _scale_last_axis(inputs["force_pts_w_frame"], fact)
 
-        row_col = np.arange(num_eval_points * 3)
-
-        self.declare_partials("coll_pts_pg", "coll_pts_w_frame", rows=row_col, cols=row_col)
-        self.declare_partials("force_pts_pg", "force_pts_w_frame", rows=row_col, cols=row_col)
-        self.declare_partials("bound_vecs_pg", "bound_vecs_w_frame", rows=row_col, cols=row_col)
-
-        if rotational:
-            self.declare_partials(
-                "rotational_velocities_pg", "rotational_velocities_w_frame", rows=row_col, cols=row_col
+        if self.rotational:
+            fact_rot = (betaPG**2, betaPG, betaPG)
+            outputs["rotational_velocities_pg"] = _scale_last_axis(
+                inputs["rotational_velocities_w_frame"], fact_rot
             )
 
-        for surface in surfaces:
-            mesh = surface["mesh"]
-            nx = mesh.shape[0]
-            ny = mesh.shape[1]
+        fact_norm = (betaPG, 1.0, 1.0)
+        for surface in self.surfaces:
             name = surface["name"]
 
-            nn = (nx - 1) * (ny - 1)
-            row_col = np.arange(3 * nn)
-
-            wrt_name = "{}_normals_w_frame".format(name)
-            of_name = "{}_normals_pg".format(name)
-            self.declare_partials(of_name, wrt_name, rows=row_col, cols=row_col)
-
-            nn = nx * ny
-            row_col = np.arange(3 * nn)
-
-            wrt_name = "{}_def_mesh_w_frame".format(name)
-            of_name = "{}_def_mesh_pg".format(name)
-            self.declare_partials(of_name, wrt_name, rows=row_col, cols=row_col)
-
-    def compute(self, inputs, outputs):
-        rotational = self.options["rotational"]
-
-        M = inputs["Mach_number"]
-        betaPG = np.sqrt(1 - M**2)
-
-        outputs["bound_vecs_pg"] = inputs["bound_vecs_w_frame"]
-        outputs["bound_vecs_pg"][:, 1] *= betaPG
-        outputs["bound_vecs_pg"][:, 2] *= betaPG
-
-        outputs["coll_pts_pg"] = inputs["coll_pts_w_frame"]
-        outputs["coll_pts_pg"][:, 1] *= betaPG
-        outputs["coll_pts_pg"][:, 2] *= betaPG
-
-        outputs["force_pts_pg"] = inputs["force_pts_w_frame"]
-        outputs["force_pts_pg"][:, 1] *= betaPG
-        outputs["force_pts_pg"][:, 2] *= betaPG
-
-        if rotational:
-            outputs["rotational_velocities_pg"] = inputs["rotational_velocities_w_frame"]
-            outputs["rotational_velocities_pg"][:, 0] *= betaPG**2
-            outputs["rotational_velocities_pg"][:, 1] *= betaPG
-            outputs["rotational_velocities_pg"][:, 2] *= betaPG
-
-        for surface in self.options["surfaces"]:
-            name = surface["name"]
-
-            wrt_name = "{}_def_mesh_w_frame".format(name)
-            of_name = "{}_def_mesh_pg".format(name)
-
-            outputs[of_name] = inputs[wrt_name]
-            outputs[of_name][:, :, 1] *= betaPG
-            outputs[of_name][:, :, 2] *= betaPG
-
-            wrt_name = "{}_normals_w_frame".format(name)
-            of_name = "{}_normals_pg".format(name)
-
-            outputs[of_name] = inputs[wrt_name]
-            outputs[of_name][:, :, 0] *= betaPG
-
-    def compute_partials(self, inputs, partials):
-        rotational = self.options["rotational"]
-
-        M = inputs["Mach_number"]
-        betaPG = np.sqrt(1 - M**2).item()
-        fact = np.array([1.0, betaPG, betaPG], M.dtype)
-        fact_norm = np.array([betaPG, 1.0, 1.0], M.dtype)
-        num_eval_pts = inputs["bound_vecs_w_frame"].shape[0]
-
-        partials["bound_vecs_pg", "bound_vecs_w_frame"] = np.tile(fact, num_eval_pts)
-        partials["coll_pts_pg", "coll_pts_w_frame"] = np.tile(fact, num_eval_pts)
-        partials["force_pts_pg", "force_pts_w_frame"] = np.tile(fact, num_eval_pts)
-
-        if rotational:
-            fact_rot = np.array([betaPG**2, betaPG, betaPG], M.dtype)
-            partials["rotational_velocities_pg", "rotational_velocities_w_frame"] = np.tile(fact_rot, num_eval_pts)
-
-        for surface in self.options["surfaces"]:
-            mesh = surface["mesh"]
-            nx = mesh.shape[0]
-            ny = mesh.shape[1]
-            name = surface["name"]
-
-            wrt_name = "{}_def_mesh_w_frame".format(name)
-            of_name = "{}_def_mesh_pg".format(name)
-            nn = nx * ny
-            partials[of_name, wrt_name] = np.tile(fact, nn)
-
-            wrt_name = "{}_normals_w_frame".format(name)
-            of_name = "{}_normals_pg".format(name)
-            nn = (nx - 1) * (ny - 1)
-            partials[of_name, wrt_name] = np.tile(fact_norm, nn)
+            outputs[f"{name}_def_mesh_pg"] = _scale_last_axis(inputs[f"{name}_def_mesh_w_frame"], fact)
+            outputs[f"{name}_normals_pg"] = _scale_last_axis(inputs[f"{name}_normals_w_frame"], fact_norm)
 
 
-class ScaleFromPrandtlGlauert(om.ExplicitComponent):
+class ScaleFromPrandtlGlauert(JaxExplicitComp):
     """
     Scale the Prandtl-Glauert transformed forces to get the physical forces
     Prandtl-Glauert transformed geometry.
@@ -261,64 +189,37 @@ class ScaleFromPrandtlGlauert(om.ExplicitComponent):
         Force vectors on each panel (lattice) in wind frame.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
+    surfaces: list[Surface]
 
-    def setup(self):
-        self.add_input("Mach_number", val=0.0, tags=["mphys_input"])
+    @model_validator(mode="before")
+    @classmethod
+    def _build_vars(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = vars(field_values(cls, data))
+        d = VarDecl()
+        _spec = data  # the setup code below may rebind `data`
 
-        # We'll compute all of sensitivities associated with Mach number through
-        # complex-step. Since it's a scalar this is pretty cheap.
-        self.declare_partials("*", "Mach_number", method="cs")
-        self.set_check_partial_options(wrt="Mach_number", method="fd", step=1e-8)
+        d.add_input("Mach_number", val=0.0, tags=["mphys_input"])
 
-        for surface in self.options["surfaces"]:
+        for surface in f["surfaces"]:
             mesh = surface["mesh"]
             nx = mesh.shape[0]
             ny = mesh.shape[1]
             name = surface["name"]
 
-            wrt_name = "{}_sec_forces_pg".format(name)
-            of_name = "{}_sec_forces_w_frame".format(name)
+            d.add_input(f"{name}_sec_forces_pg", val=np.zeros((nx - 1, ny - 1, 3)), units="N")
+            d.add_output(f"{name}_sec_forces_w_frame", val=np.zeros((nx - 1, ny - 1, 3)), units="N")
 
-            self.add_input(wrt_name, val=np.zeros((nx - 1, ny - 1, 3)), units="N")
-            self.add_output(of_name, val=np.zeros((nx - 1, ny - 1, 3)), units="N")
+        # Derivatives are handled automatically by JaxExplicitComp (asdex-detected
+        # sparsity + autodiff), so no declare_partials calls are needed here.
+        return d.into(_spec)
 
-            nn = (nx - 1) * (ny - 1)
-            row_col = np.arange(3 * nn)
-
-            self.declare_partials(of_name, wrt_name, rows=row_col, cols=row_col)
-
-    def compute(self, inputs, outputs):
+    def compute_outputs(self, inputs, outputs, discrete_inputs=None, discrete_outputs=None, statics=None):
         M = inputs["Mach_number"]
-        betaPG = np.sqrt(1 - M**2)
+        betaPG = jnp.sqrt(1 - M**2)
+        fact = (1.0 / betaPG**4, 1.0 / betaPG**3, 1.0 / betaPG**3)
 
-        for surface in self.options["surfaces"]:
+        for surface in self.surfaces:
             name = surface["name"]
-            wrt_name = "{}_sec_forces_pg".format(name)
-            of_name = "{}_sec_forces_w_frame".format(name)
-
-            outputs[of_name] = inputs[wrt_name]
-            outputs[of_name][:, :, 0] *= 1.0 / betaPG**4
-            outputs[of_name][:, :, 1] *= 1.0 / betaPG**3
-            outputs[of_name][:, :, 2] *= 1.0 / betaPG**3
-
-    def compute_partials(self, inputs, partials):
-        M = inputs["Mach_number"]
-        betaPG = np.sqrt(1 - M**2)
-
-        term1 = 1.0 / betaPG**4
-        term2 = 1.0 / betaPG**3
-        fact = np.array([term1, term2, term2], M.dtype).flatten()
-
-        for surface in self.options["surfaces"]:
-            mesh = surface["mesh"]
-            nx = mesh.shape[0]
-            ny = mesh.shape[1]
-            name = surface["name"]
-
-            wrt_name = "{}_sec_forces_pg".format(name)
-            of_name = "{}_sec_forces_w_frame".format(name)
-
-            nn = (nx - 1) * (ny - 1)
-            partials[of_name, wrt_name] = np.tile(fact, nn)
+            outputs[f"{name}_sec_forces_w_frame"] = _scale_last_axis(inputs[f"{name}_sec_forces_pg"], fact)
