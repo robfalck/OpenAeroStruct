@@ -41,7 +41,71 @@ _COMPOSITE_KEYS = (
 )
 
 
-class Surface(BaseModel):
+def _coerce_legacy_fields(cls: type[BaseModel], data: dict) -> dict:
+    """
+    Shared legacy-dict handling for ``Surface``/``MultiSectionSurface``.
+
+    OM3-era OAS warned about and ignored unknown surface dict keys (``check_surface_dict_keys``),
+    and existing scripts and test fixtures rely on that (e.g. mesh-generator keys left in the
+    surface dict), so unknown keys are dropped with a warning rather than forbidden. Legacy dicts
+    also commonly hold numpy scalars and ints (scalar or inside a list) where floats are expected.
+    """
+    data = dict(data)
+    data.pop("is_multi_section", None)
+    known = set(cls.model_fields) | {"yield"}
+    for key in [k for k in data if k not in known]:
+        warnings.warn(
+            f"Key `{key}` in surface dict is (likely) not supported in OAS and will be ignored",
+            category=RuntimeWarning,
+            stacklevel=2,
+        )
+        data.pop(key)
+    for key, val in list(data.items()):
+        if isinstance(val, np.generic):
+            val = data[key] = val.item()
+        field = cls.model_fields.get(key)
+        if field is None:
+            continue
+        if field.annotation in (float, float | None) and isinstance(val, int) and not isinstance(val, bool):
+            data[key] = float(val)
+        elif field.annotation in (list[float], list[float] | None) and isinstance(val, list):
+            data[key] = [float(v) if isinstance(v, int) and not isinstance(v, bool) else v for v in val]
+    return data
+
+
+class _SurfaceMappingMixin:
+    """
+    Read-only mapping protocol for OM3-era component math: ``surface["key"]``, ``"key" in
+    surface``, ``surface.get(...)``, shared by ``Surface`` and ``MultiSectionSurface``.
+    """
+
+    @staticmethod
+    def _field_name(key: str) -> str:
+        return "yield_stress" if key == "yield" else key
+
+    def __getitem__(self, key: str) -> Any:
+        name = self._field_name(key)
+        if name not in type(self).model_fields:
+            raise KeyError(key)
+        return getattr(self, name)
+
+    def __contains__(self, key: object) -> bool:
+        if not isinstance(key, str):
+            return False
+        name = self._field_name(key)
+        return name in type(self).model_fields and getattr(self, name) is not None
+
+    def get(self, key: str, default: Any = None) -> Any:
+        val = self[key] if self._field_name(key) in type(self).model_fields else None
+        return default if val is None else val
+
+    def keys(self) -> list[str]:
+        """Return the keys that were given, as the legacy dict would have had them."""
+        names = ("yield" if n == "yield_stress" else n for n in type(self).model_fields)
+        return [k for k in names if k in self]
+
+
+class Surface(_SurfaceMappingMixin, BaseModel):
     """A single lifting surface: its geometry, discretization, and material properties."""
 
     model_config = ConfigDict(
@@ -152,32 +216,7 @@ class Surface(BaseModel):
     def _coerce_legacy_dict(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        data = dict(data)
-        if data.get("is_multi_section"):
-            raise NotImplementedError(
-                "Multi-section surfaces are not yet ported to om4 (see ai/TECH_DEBT.md)."
-            )
-        data.pop("is_multi_section", None)
-        # OM3-era OAS warned about and ignored unknown keys (check_surface_dict_keys), and
-        # existing scripts and test fixtures rely on that (e.g. mesh-generator keys such as
-        # num_x/num_y left in the surface dict), so keep that behavior rather than forbid.
-        known = set(cls.model_fields) | {"yield"}
-        for key in [k for k in data if k not in known]:
-            warnings.warn(
-                f"Key `{key}` in surface dict is (likely) not supported in OAS and will be ignored",
-                category=RuntimeWarning,
-                stacklevel=2,
-            )
-            data.pop(key)
-        # Legacy dicts commonly hold numpy scalars and ints where floats are expected.
-        for key, val in list(data.items()):
-            if isinstance(val, np.generic):
-                data[key] = val.item()
-            field = cls.model_fields.get(key)
-            if field is not None and isinstance(data[key], int) and not isinstance(data[key], bool):
-                if field.annotation in (float, float | None):
-                    data[key] = float(data[key])
-        return data
+        return _coerce_legacy_fields(cls, data)
 
     @model_validator(mode="after")
     def _check_composite(self):
@@ -200,29 +239,89 @@ class Surface(BaseModel):
             )
         return self
 
-    # --- read-only mapping protocol, for the OM3-era component math ------------------
 
-    @staticmethod
-    def _field_name(key: str) -> str:
-        return "yield_stress" if key == "yield" else key
+class MultiSectionSurface(_SurfaceMappingMixin, BaseModel):
+    """
+    A wing built from several sections, each independently shaped, stitched into one surface.
 
-    def __getitem__(self, key: str) -> Any:
-        name = self._field_name(key)
-        if name not in type(self).model_fields:
-            raise KeyError(key)
-        return getattr(self, name)
+    Unlike ``Surface``, most geometry fields here are per-section **lists** (one entry per
+    section), since each section can have its own taper/span/sweep/twist/etc. ``mesh``/
+    ``t_over_c`` are not: callers compute the unified mesh (``unify_mesh``) and t/c
+    (``GeomMultiUnification``) across all sections and write them back here, mirroring how
+    ``Surface.mesh`` holds a single resolved mesh.
+    """
 
-    def __contains__(self, key: object) -> bool:
-        if not isinstance(key, str):
-            return False
-        name = self._field_name(key)
-        return name in type(self).model_fields and getattr(self, name) is not None
+    model_config = ConfigDict(
+        strict=True, extra="forbid", arbitrary_types_allowed=True, populate_by_name=True
+    )
 
-    def get(self, key: str, default: Any = None) -> Any:
-        val = self[key] if self._field_name(key) in type(self).model_fields else None
-        return default if val is None else val
+    # --- wing definition -------------------------------------------------------------
+    name: str = Field(description="Name of the multi-section surface; prefixes its variables in the model.")
+    num_sections: int = Field(description="Number of sections in the multi-section surface.")
+    sec_name: list[str] = Field(description="Name of each section.")
+    symmetry: bool = Field(default=False, description="If True, model one half of the surface.")
+    S_ref_type: Literal["wetted", "projected"] = Field(default="wetted")
+    root_section: int | None = None
+    ref_axis_pos: float | None = None
+    taper: list[float] | None = None
+    span: list[float] | None = None
+    sweep: list[float] | None = None
+    dihedral: list[float] | None = None
+    twist_cp: list[FloatOrNpArray] | None = None
+    chord_cp: list[FloatOrNpArray] | None = None
+    xshear_cp: list[FloatOrNpArray] | None = None
+    yshear_cp: list[FloatOrNpArray] | None = None
+    zshear_cp: list[FloatOrNpArray] | None = None
 
-    def keys(self) -> list[str]:
-        """Return the keys that were given, as the legacy dict would have had them."""
-        names = ("yield" if n == "yield_stress" else n for n in type(self).model_fields)
-        return [k for k in names if k in self]
+    # --- mesh generation ---------------------------------------------------------------
+    root_chord: float | None = None
+    meshes: Literal["gen-meshes"] | list[FloatOrNpArray] = Field(
+        description="Mesh of each section, or 'gen-meshes' to build them from the section keys."
+    )
+    nx: int | None = None
+    ny: list[int] | None = None
+    # Filled in by the caller with the unified mesh (``unify_mesh``) before this model is used
+    # to build a ``MultiSecGeometry``/``MultiSecAerostructGeometry``.
+    mesh: FloatOrNpArray | None = None
+
+    # --- aerodynamics ------------------------------------------------------------------
+    CL0: float = 0.0
+    CD0: float = 0.0
+    with_viscous: bool = False
+    with_wave: bool = False
+    groundplane: bool = False
+    k_lam: float | None = None
+    t_over_c_cp: list[FloatOrNpArray] | None = None
+    c_max_t: float | None = None
+
+    # --- structures (shared across all sections; the unified structural beam) ---------
+    fem_model_type: Literal["tube", "wingbox"] | None = None
+    E: float | None = None
+    G: float | None = None
+    yield_stress: float | None = Field(default=None, alias="yield")
+    mrho: float | None = None
+    fem_origin: float | None = None
+    wing_weight_ratio: float | None = None
+    exact_failure_constraint: bool | None = None
+    struct_weight_relief: bool | None = None
+    distributed_fuel_weight: bool | None = None
+    n_point_masses: int | None = None
+
+    # tube
+    thickness_cp: FloatOrNpArray | None = None
+    radius_cp: FloatOrNpArray | None = None
+
+    # wingbox
+    spar_thickness_cp: FloatOrNpArray | None = None
+    skin_thickness_cp: FloatOrNpArray | None = None
+    data_x_upper: FloatOrNpArray | None = None
+    data_y_upper: FloatOrNpArray | None = None
+    data_x_lower: FloatOrNpArray | None = None
+    data_y_lower: FloatOrNpArray | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_dict(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        return _coerce_legacy_fields(cls, data)

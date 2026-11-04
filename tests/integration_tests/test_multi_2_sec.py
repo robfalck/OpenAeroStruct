@@ -1,413 +1,270 @@
-from openmdao.utils.assert_utils import assert_near_equal
 import unittest
+
+import numpy as np
+
+import om4.api as om
+from om4.transforms.transform import AffineTransform
+from om4.utils.assert_utils import assert_near_equal
+from om4.variables.design_var import DesignVar
+from om4.variables.response import Constraint, Objective
+
+from openaerostruct.aerodynamics.aero_groups import AeroPoint
+from openaerostruct.geometry.geometry_group import MultiSecGeometry
+from openaerostruct.geometry.multi_section import build_section_dicts, multi_spline_join_kwargs, scalar_overlay, unify_mesh
+from openaerostruct.utils.testing import get_two_section_surface
+
+
+def _flow_values(prob):
+    prob.set_val("v", 1.0, units="m/s")
+    prob.set_val("alpha", 10.0, units="deg")
+    prob.set_val("Mach_number", 0.3)
+    prob.set_val("re", 1.0e5, units="1/m")
+    prob.set_val("rho", 0.38, units="kg/m**3")
+    prob.set_val("cg", np.zeros(3), units="m")
 
 
 class Test(unittest.TestCase):
     def assert_check_results_sym(self, prob):
         """We put the assert_near_equal for the test_constraint and test construction cases here since they should both return the same results."""
-        assert_near_equal(prob["aero_point_0.surface_perf.CD"][0], 0.02920058, 1e-3)
-        assert_near_equal(prob["aero_point_0.surface_perf.CL"][0], 0.2999996, 1e-3)
-        assert_near_equal(prob["aero_point_0.CM"][1], -0.07335945, 1e-3)
+        assert_near_equal(prob.get_val("aero_point_0.surface_perf.CD")[0], 0.02920058, 1e-3)
+        assert_near_equal(prob.get_val("aero_point_0.surface_perf.CL")[0], 0.2999996, 1e-3)
+        assert_near_equal(prob.get_val("aero_point_0.CM")[1], -0.07335945, 1e-3)
 
     def test_constraint(self):
-        import numpy as np
-
-        import openmdao.api as om
-
-        from openaerostruct.geometry.geometry_group import MultiSecGeometry
-        from openaerostruct.aerodynamics.aero_groups import AeroPoint
-        from openaerostruct.geometry.utils import build_section_dicts, unify_mesh
-        from openaerostruct.utils.testing import get_two_section_surface
-
         surface, sec_chord_cp = get_two_section_surface()
 
-        # Create the OpenMDAO problem for the constrained version
-        prob = om.Problem(reports=False)
-
-        # Create an independent variable component that will supply the flow
-        # conditions to the problem.
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("v", val=1.0, units="m/s")
-        indep_var_comp.add_output("alpha", val=10.0, units="deg")
-        indep_var_comp.add_output("Mach_number", val=0.3)
-        indep_var_comp.add_output("re", val=1.0e5, units="1/m")
-        indep_var_comp.add_output("rho", val=0.38, units="kg/m**3")
-        indep_var_comp.add_output("cg", val=np.zeros((3)), units="m")
-
-        # Add this IndepVarComp to the problem model
-        prob.model.add_subsystem("prob_vars", indep_var_comp, promotes=["*"])
-
-        # Generate the sections and unified mesh here in addition to adding the components.
-        # This has to also be done here since AeroPoint has to know the unified mesh size.
         section_surfaces = build_section_dicts(surface)
         uni_mesh = unify_mesh(section_surfaces)
         surface["mesh"] = uni_mesh
 
-        # Create and add a group that handles the geometry for the
-        # aerodynamic lifting surface
-        multi_geom_group = MultiSecGeometry(
-            surface=surface,
-            joining_comp=True,
-            dim_constr=[np.array([1, 0, 0]), np.array([1, 0, 0])],
+        subsystems = {
+            "surface": MultiSecGeometry(
+                surface=surface, joining_comp=True, dim_constr=[np.array([1, 0, 0]), np.array([1, 0, 0])]
+            ),
+            "aero_point_0": AeroPoint(
+                surfaces=[scalar_overlay(surface)],
+                promotes_inputs=["v", "alpha", "Mach_number", "re", "rho", "cg"],
+            ),
+        }
+
+        connections = [
+            om.Connection(
+                src="surface.surface_unification.surface_uni_mesh", tgt="aero_point_0.surface.def_mesh"
+            ),
+            om.Connection(
+                src="surface.surface_unification.surface_uni_mesh",
+                tgt="aero_point_0.aero_states.surface_def_mesh",
+            ),
+        ]
+
+        prob = om.Problem(
+            model=om.Group(
+                subsystems=subsystems,
+                connections=connections,
+                design_vars={
+                    "surface.sec0.chord_cp": DesignVar(lower=0.1, upper=10.0),
+                    "surface.sec1.chord_cp": DesignVar(lower=0.1, upper=10.0),
+                    "alpha": DesignVar(lower=0.0, upper=10.0),
+                },
+                constraints={
+                    # Equals=0.0 here is exactly rank-deficient: GeomMultiJoin's 2-row
+                    # section_separation Jacobian has its rows exactly proportional for this
+                    # (straight, untapered) two-section wing, and scipy's SLSQP chokes on an
+                    # exactly-singular *equality*-constraint Jacobian ("Singular matrix C in
+                    # LSQ subproblem"), even in OM3's own ScipyOptimizeDriver given bit-for-bit
+                    # identical gradients -- confirmed by swapping OM3's original test to
+                    # equals=0.0 and reproducing the identical failure there too. OM3's test
+                    # only avoids this by declaring lower=0, upper=0 instead of equals=0, which
+                    # happens to route through OpenMDAO's inequality code path. om4's Constraint
+                    # has no such escape hatch (lb==ub always becomes a true equality), so a
+                    # tight tolerance band is used instead of exact equality.
+                    "surface.surface_joining.section_separation": Constraint(lower=-1e-6, upper=1e-6),
+                    "aero_point_0.CL": Constraint(equals=0.3),
+                    "aero_point_0.total_perf.S_ref_total": Constraint(equals=2.0),
+                },
+                objectives={"aero_point_0.CD": Objective(transform=AffineTransform.from_scaler_adder(scaler=1e4))},
+                optimizer=om.ScipyMinimizeOptimizer(optimizer="SLSQP", tol=1e-7, maxiter=1000),
+            )
         )
-        prob.model.add_subsystem(surface["name"], multi_geom_group)
 
-        # Create the aero point group, which contains the actual aerodynamic
-        # analyses
-        aero_group = AeroPoint(surfaces=[surface])
-        point_name = "aero_point_0"
-        prob.model.add_subsystem(
-            point_name, aero_group, promotes_inputs=["v", "alpha", "Mach_number", "re", "rho", "cg"]
-        )
-
-        # Get name of surface and construct unified mesh name
-        name = surface["name"]
-        unification_name = "{}_unification".format(surface["name"])
-
-        # Connect the mesh from the mesh unification component to the analysis point
-        prob.model.connect(
-            name + "." + unification_name + "." + name + "_uni_mesh", point_name + "." + "surface" + ".def_mesh"
-        )
-
-        # Perform the connections with the modified names within the
-        # 'aero_states' group.
-        prob.model.connect(
-            name + "." + unification_name + "." + name + "_uni_mesh",
-            point_name + ".aero_states." + "surface" + "_def_mesh",
-        )
-
-        # Add DVs
-        prob.model.add_design_var("surface.sec0.chord_cp", lower=0.1, upper=10.0, units=None)
-        prob.model.add_design_var("surface.sec1.chord_cp", lower=0.1, upper=10.0, units=None)
-        prob.model.add_design_var("alpha", lower=0.0, upper=10.0, units="deg")
-
-        # Add joined mesh constraint
-        prob.model.add_constraint("surface.surface_joining.section_separation", upper=0, lower=0)
-
-        # Add CL constraint
-        prob.model.add_constraint(point_name + ".CL", equals=0.3)
-
-        # Add Area constraint
-        prob.model.add_constraint(point_name + ".total_perf.S_ref_total", equals=2.0)
-
-        # Add objective
-        prob.model.add_objective(point_name + ".CD", scaler=1e4)
-
-        prob.driver = om.ScipyOptimizeDriver()
-        prob.driver.options["optimizer"] = "SLSQP"
-        prob.driver.options["tol"] = 1e-7
-        prob.driver.options["disp"] = True
-        prob.driver.options["maxiter"] = 1000
-        # prob.driver.options["debug_print"] = ["nl_cons", "objs", "desvars"]
-
-        # Set up and run the optimization problem
-        prob.setup()
-        prob.run_driver()
+        _flow_values(prob)
+        prob.run_optimizer()
+        # Workaround for om4 B-018 (ai/OM4_NEEDS.md): CM isn't part of any declared
+        # design_var/constraint/objective here, so it can be left stale by run_optimizer();
+        # force a full re-propagation before reading it.
+        prob.run_model()
 
         self.assert_check_results_sym(prob)
 
     def test_construction(self):
-        import numpy as np
-
-        import openmdao.api as om
-
-        from openaerostruct.geometry.geometry_group import MultiSecGeometry
-        from openaerostruct.aerodynamics.aero_groups import AeroPoint
-        from openaerostruct.geometry.utils import (
-            build_section_dicts,
-            unify_mesh,
-            build_multi_spline,
-            connect_multi_spline,
-        )
-        from openaerostruct.utils.testing import get_two_section_surface
-
         surface, sec_chord_cp = get_two_section_surface()
 
-        # Create the OpenMDAO problem
-        prob = om.Problem(reports=False)
-
-        # Create an independent variable component that will supply the flow
-        # conditions to the problem.
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("v", val=1.0, units="m/s")
-        indep_var_comp.add_output("alpha", val=10.0, units="deg")
-        indep_var_comp.add_output("Mach_number", val=0.3)
-        indep_var_comp.add_output("re", val=1.0e5, units="1/m")
-        indep_var_comp.add_output("rho", val=0.38, units="kg/m**3")
-        indep_var_comp.add_output("cg", val=np.zeros((3)), units="m")
-
-        # Add this IndepVarComp to the problem model
-        prob.model.add_subsystem("prob_vars", indep_var_comp, promotes=["*"])
-
-        # Generate the sections and unified mesh here. It's needed to join the sections by construction.
         section_surfaces = build_section_dicts(surface)
         uni_mesh = unify_mesh(section_surfaces)
         surface["mesh"] = uni_mesh
 
-        # Build a component with B-spline control points that joins the sections by construction
-        chord_comp = build_multi_spline("chord_cp", len(section_surfaces), sec_chord_cp)
-        prob.model.add_subsystem("chord_bspline", chord_comp)
+        chord_kwargs = multi_spline_join_kwargs("chord_cp", section_surfaces, sec_chord_cp, surface["name"])
 
-        # Connect the B-spline component to the section B-splines
-        connect_multi_spline(prob, section_surfaces, sec_chord_cp, "chord_cp", "chord_bspline", surface["name"])
+        subsystems = {
+            **chord_kwargs["subsystems"],
+            "surface": MultiSecGeometry(surface=surface),
+            "aero_point_0": AeroPoint(
+                surfaces=[scalar_overlay(surface)],
+                promotes_inputs=["v", "alpha", "Mach_number", "re", "rho", "cg"],
+            ),
+        }
 
-        # Create and add a group that handles the geometry for the
-        # aerodynamic lifting surface
-        multi_geom_group = MultiSecGeometry(surface=surface)
-        prob.model.add_subsystem(surface["name"], multi_geom_group)
+        connections = [
+            *chord_kwargs["connections"],
+            om.Connection(
+                src="surface.surface_unification.surface_uni_mesh", tgt="aero_point_0.surface.def_mesh"
+            ),
+            om.Connection(
+                src="surface.surface_unification.surface_uni_mesh",
+                tgt="aero_point_0.aero_states.surface_def_mesh",
+            ),
+        ]
 
-        # Create the aero point group, which contains the actual aerodynamic
-        # analyses
-        aero_group = AeroPoint(surfaces=[surface])
-        point_name = "aero_point_0"
-        prob.model.add_subsystem(
-            point_name, aero_group, promotes_inputs=["v", "alpha", "Mach_number", "re", "rho", "cg"]
+        prob = om.Problem(
+            model=om.Group(
+                subsystems=subsystems,
+                connections=connections,
+                design_vars={
+                    "chord_cp_spline": DesignVar(lower=0.1, upper=10.0),
+                    "alpha": DesignVar(lower=0.0, upper=10.0),
+                },
+                constraints={
+                    "aero_point_0.CL": Constraint(equals=0.3),
+                    "aero_point_0.total_perf.S_ref_total": Constraint(equals=2.0),
+                },
+                objectives={"aero_point_0.CD": Objective(transform=AffineTransform.from_scaler_adder(scaler=1e4))},
+                optimizer=om.ScipyMinimizeOptimizer(optimizer="SLSQP", tol=1e-7, maxiter=1000),
+            )
         )
 
-        # Get name of surface and construct unified mesh name
-        name = surface["name"]
-        unification_name = "{}_unification".format(surface["name"])
-
-        # Connect the mesh from the mesh unification component to the analysis point
-        prob.model.connect(
-            name + "." + unification_name + "." + name + "_uni_mesh", point_name + "." + "surface" + ".def_mesh"
-        )
-
-        # Perform the connections with the modified names within the
-        # 'aero_states' group.
-        prob.model.connect(
-            name + "." + unification_name + "." + name + "_uni_mesh",
-            point_name + ".aero_states." + "surface" + "_def_mesh",
-        )
-
-        # Add DVs
-        prob.model.add_design_var("chord_bspline.chord_cp_spline", lower=0.1, upper=10.0, units=None)
-        prob.model.add_design_var("alpha", lower=0.0, upper=10.0, units="deg")
-
-        # Add CL constraint
-        prob.model.add_constraint(point_name + ".CL", equals=0.3)
-
-        # Add Area constraint
-        prob.model.add_constraint(point_name + ".total_perf.S_ref_total", equals=2.0)
-
-        # Add objective
-        prob.model.add_objective(point_name + ".CD", scaler=1e4)
-
-        prob.driver = om.ScipyOptimizeDriver()
-        prob.driver.options["optimizer"] = "SLSQP"
-        prob.driver.options["tol"] = 1e-7
-        prob.driver.options["disp"] = True
-        prob.driver.options["maxiter"] = 1000
-        # prob.driver.options["debug_print"] = ["nl_cons", "objs", "desvars"]
-
-        # Set up and run the optimization problem
-        prob.setup()
-        prob.run_driver()
+        _flow_values(prob)
+        prob.run_optimizer()
+        # Workaround for om4 B-018 (ai/OM4_NEEDS.md): see test_constraint above.
+        prob.run_model()
 
         self.assert_check_results_sym(prob)
 
     def test_asymmetrical(self):
-        import numpy as np
-
-        import openmdao.api as om
-
-        from openaerostruct.geometry.geometry_group import MultiSecGeometry
-        from openaerostruct.aerodynamics.aero_groups import AeroPoint
-        from openaerostruct.geometry.utils import build_section_dicts, unify_mesh
-        from openaerostruct.utils.testing import get_two_section_surface
-
         surface, sec_chord_cp = get_two_section_surface(sym=False, visc=False)
 
-        # Create the OpenMDAO problem
-        prob = om.Problem(reports=False)
-
-        # Create an independent variable component that will supply the flow
-        # conditions to the problem.
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("v", val=1.0, units="m/s")
-        indep_var_comp.add_output("alpha", val=10.0, units="deg")
-        indep_var_comp.add_output("Mach_number", val=0.3)
-        indep_var_comp.add_output("re", val=1.0e5, units="1/m")
-        indep_var_comp.add_output("rho", val=0.38, units="kg/m**3")
-        indep_var_comp.add_output("cg", val=np.zeros((3)), units="m")
-
-        # Add this IndepVarComp to the problem model
-        prob.model.add_subsystem("prob_vars", indep_var_comp, promotes=["*"])
-
-        # Create and add a group that handles the geometry for the
-        # aerodynamic lifting surface
-        multi_geom_group = MultiSecGeometry(
-            surface=surface, joining_comp=True, dim_constr=[np.array([1, 0, 0]), np.array([1, 0, 0])]
-        )
-        prob.model.add_subsystem(surface["name"], multi_geom_group)
-
-        # Generate the sections and unified mesh here in addition to adding the components.
-        # This has to ALSO be done here since AeroPoint has to know the unified mesh size.
         section_surfaces = build_section_dicts(surface)
         uni_mesh = unify_mesh(section_surfaces)
         surface["mesh"] = uni_mesh
 
-        # Create the aero point group, which contains the actual aerodynamic
-        # analyses
-        aero_group = AeroPoint(surfaces=[surface])
-        point_name = "aero_point_0"
-        prob.model.add_subsystem(
-            point_name, aero_group, promotes_inputs=["v", "alpha", "Mach_number", "re", "rho", "cg"]
+        subsystems = {
+            "surface": MultiSecGeometry(
+                surface=surface, joining_comp=True, dim_constr=[np.array([1, 0, 0]), np.array([1, 0, 0])]
+            ),
+            "aero_point_0": AeroPoint(
+                surfaces=[scalar_overlay(surface)],
+                promotes_inputs=["v", "alpha", "Mach_number", "re", "rho", "cg"],
+            ),
+        }
+
+        connections = [
+            om.Connection(
+                src="surface.surface_unification.surface_uni_mesh", tgt="aero_point_0.surface.def_mesh"
+            ),
+            om.Connection(
+                src="surface.surface_unification.surface_uni_mesh",
+                tgt="aero_point_0.aero_states.surface_def_mesh",
+            ),
+        ]
+
+        prob = om.Problem(
+            model=om.Group(
+                subsystems=subsystems,
+                connections=connections,
+                design_vars={
+                    "surface.sec0.chord_cp": DesignVar(lower=0.1, upper=10.0),
+                    "surface.sec1.chord_cp": DesignVar(lower=0.1, upper=10.0),
+                    "alpha": DesignVar(lower=0.0, upper=10.0),
+                },
+                constraints={
+                    # Tolerance band instead of exact equality: see test_constraint above
+                    # for why equals=0.0 makes GeomMultiJoin's section_separation constraint
+                    # exactly rank-deficient and crashes SLSQP.
+                    "surface.surface_joining.section_separation": Constraint(lower=-1e-6, upper=1e-6),
+                    "aero_point_0.CL": Constraint(equals=0.3),
+                    "aero_point_0.total_perf.S_ref_total": Constraint(equals=2.0),
+                },
+                objectives={"aero_point_0.CD": Objective(transform=AffineTransform.from_scaler_adder(scaler=1e4))},
+                optimizer=om.ScipyMinimizeOptimizer(optimizer="SLSQP", tol=1e-3, maxiter=1000),
+            )
         )
 
-        # Get name of surface and construct unified mesh name
-        name = surface["name"]
-        unification_name = "{}_unification".format(surface["name"])
+        _flow_values(prob)
+        prob.run_optimizer()
+        # Workaround for om4 B-018 (ai/OM4_NEEDS.md): see test_constraint above.
+        prob.run_model()
 
-        # Connect the mesh from the mesh unification component to the analysis point
-        prob.model.connect(
-            name + "." + unification_name + "." + name + "_uni_mesh", point_name + "." + "surface" + ".def_mesh"
-        )
-
-        # Perform the connections with the modified names within the
-        # 'aero_states' group.
-        prob.model.connect(
-            name + "." + unification_name + "." + name + "_uni_mesh",
-            point_name + ".aero_states." + "surface" + "_def_mesh",
-        )
-
-        prob.model.add_design_var("surface.sec0.chord_cp", lower=0.1, upper=10.0, units=None)
-        prob.model.add_design_var("surface.sec1.chord_cp", lower=0.1, upper=10.0, units=None)
-        prob.model.add_design_var("alpha", lower=0.0, upper=10.0, units="deg")
-
-        # Add joined mesh constraint
-        prob.model.add_constraint("surface.surface_joining.section_separation", upper=0, lower=0)
-
-        # Add CL constraint
-        prob.model.add_constraint(point_name + ".CL", equals=0.3)
-
-        # Add Area constraint
-        prob.model.add_constraint(point_name + ".total_perf.S_ref_total", equals=2.0)
-
-        # Add objective
-        prob.model.add_objective(point_name + ".CD", scaler=1e4)
-
-        prob.driver = om.ScipyOptimizeDriver()
-        prob.driver.options["optimizer"] = "SLSQP"
-        prob.driver.options["tol"] = 1e-3
-        prob.driver.options["disp"] = True
-        prob.driver.options["maxiter"] = 1000
-        # prob.driver.options["debug_print"] = ["nl_cons", "objs", "desvars"]
-
-        # Set up and run the optimization problem
-        prob.setup()
-        prob.run_driver()
-
-        assert_near_equal(prob["aero_point_0.surface_perf.CD"][0], 0.02902683, 1e-6)
-        assert_near_equal(prob["aero_point_0.surface_perf.CL"][0], 0.29999999, 1e-6)
-        assert_near_equal(prob["aero_point_0.CM"][1], -0.07375071, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_0.surface_perf.CD")[0], 0.02902683, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_0.surface_perf.CL")[0], 0.29999999, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_0.CM")[1], -0.07375071, 1e-6)
 
     def test_visc(self):
-        import numpy as np
-
-        import openmdao.api as om
-
-        from openaerostruct.geometry.geometry_group import MultiSecGeometry
-        from openaerostruct.aerodynamics.aero_groups import AeroPoint
-        from openaerostruct.geometry.utils import (
-            build_section_dicts,
-            unify_mesh,
-            build_multi_spline,
-            connect_multi_spline,
-        )
-        from openaerostruct.utils.testing import get_two_section_surface
-
         surface, sec_chord_cp = get_two_section_surface(sym=True, visc=True)
 
-        # Create the OpenMDAO problem
-        prob = om.Problem(reports=False)
-
-        # Create an independent variable component that will supply the flow
-        # conditions to the problem.
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("v", val=1.0, units="m/s")
-        indep_var_comp.add_output("alpha", val=10.0, units="deg")
-        indep_var_comp.add_output("Mach_number", val=0.3)
-        indep_var_comp.add_output("re", val=1.0e5, units="1/m")
-        indep_var_comp.add_output("rho", val=0.38, units="kg/m**3")
-        indep_var_comp.add_output("cg", val=np.zeros((3)), units="m")
-
-        # Add this IndepVarComp to the problem model
-        prob.model.add_subsystem("prob_vars", indep_var_comp, promotes=["*"])
-
-        # Generate the sections and unified mesh here. It's needed to join the sections by construction.
         section_surfaces = build_section_dicts(surface)
         uni_mesh = unify_mesh(section_surfaces)
         surface["mesh"] = uni_mesh
 
-        # Build a component with B-spline control points that joins the sections by construction
-        chord_comp = build_multi_spline("chord_cp", len(section_surfaces), sec_chord_cp)
-        prob.model.add_subsystem("chord_bspline", chord_comp)
+        chord_kwargs = multi_spline_join_kwargs("chord_cp", section_surfaces, sec_chord_cp, surface["name"])
 
-        # Connect the B-spline component to the section B-splines
-        connect_multi_spline(prob, section_surfaces, sec_chord_cp, "chord_cp", "chord_bspline", surface["name"])
+        subsystems = {
+            **chord_kwargs["subsystems"],
+            "surface": MultiSecGeometry(surface=surface),
+            "aero_point_0": AeroPoint(
+                surfaces=[scalar_overlay(surface)],
+                promotes_inputs=["v", "alpha", "Mach_number", "re", "rho", "cg"],
+            ),
+        }
 
-        # Create and add a group that handles the geometry for the
-        # aerodynamic lifting surface
-        multi_geom_group = MultiSecGeometry(surface=surface)
-        prob.model.add_subsystem(surface["name"], multi_geom_group)
+        connections = [
+            *chord_kwargs["connections"],
+            om.Connection(
+                src="surface.surface_unification.surface_uni_mesh", tgt="aero_point_0.surface.def_mesh"
+            ),
+            om.Connection(
+                src="surface.surface_unification.surface_uni_mesh",
+                tgt="aero_point_0.aero_states.surface_def_mesh",
+            ),
+            om.Connection(
+                src="surface.surface_unification.surface_uni_t_over_c",
+                tgt="aero_point_0.surface_perf.t_over_c",
+            ),
+        ]
 
-        # Create the aero point group, which contains the actual aerodynamic
-        # analyses
-        aero_group = AeroPoint(surfaces=[surface])
-        point_name = "aero_point_0"
-        prob.model.add_subsystem(
-            point_name, aero_group, promotes_inputs=["v", "alpha", "Mach_number", "re", "rho", "cg"]
+        prob = om.Problem(
+            model=om.Group(
+                subsystems=subsystems,
+                connections=connections,
+                design_vars={
+                    "chord_cp_spline": DesignVar(lower=0.1, upper=10.0),
+                    "alpha": DesignVar(lower=0.0, upper=10.0),
+                },
+                constraints={
+                    "aero_point_0.CL": Constraint(equals=0.3),
+                    "aero_point_0.total_perf.S_ref_total": Constraint(equals=2.0),
+                },
+                objectives={"aero_point_0.CD": Objective(transform=AffineTransform.from_scaler_adder(scaler=1e4))},
+                optimizer=om.ScipyMinimizeOptimizer(optimizer="SLSQP", tol=1e-7, maxiter=1000),
+            )
         )
 
-        # Get name of surface and construct unified mesh name
-        name = surface["name"]
-        unification_name = "{}_unification".format(surface["name"])
+        _flow_values(prob)
+        prob.run_optimizer()
+        # Workaround for om4 B-018 (ai/OM4_NEEDS.md): see test_constraint above.
+        prob.run_model()
 
-        # Connect the mesh from the mesh unification component to the analysis point
-        prob.model.connect(
-            name + "." + unification_name + "." + name + "_uni_mesh", point_name + "." + "surface" + ".def_mesh"
-        )
-
-        # Perform the connections with the modified names within the
-        # 'aero_states' group.
-        prob.model.connect(
-            name + "." + unification_name + "." + name + "_uni_mesh",
-            point_name + ".aero_states." + "surface" + "_def_mesh",
-        )
-
-        # Connect t over c B-spline for viscous drag
-        prob.model.connect(
-            name + "." + unification_name + "." + name + "_uni_t_over_c",
-            point_name + "." + name + "_perf." + "t_over_c",
-        )
-
-        # Add DVs
-        prob.model.add_design_var("chord_bspline.chord_cp_spline", lower=0.1, upper=10.0, units=None)
-        prob.model.add_design_var("alpha", lower=0.0, upper=10.0, units="deg")
-
-        # Add CL constraint
-        prob.model.add_constraint(point_name + ".CL", equals=0.3)
-
-        # Add Area constraint
-        prob.model.add_constraint(point_name + ".total_perf.S_ref_total", equals=2.0)
-
-        # Add objective
-        prob.model.add_objective(point_name + ".CD", scaler=1e4)
-
-        prob.driver = om.ScipyOptimizeDriver()
-        prob.driver.options["optimizer"] = "SLSQP"
-        prob.driver.options["tol"] = 1e-7
-        prob.driver.options["disp"] = True
-        prob.driver.options["maxiter"] = 1000
-
-        # Set up and run the optimization problem
-        prob.setup()
-        prob.run_driver()
-
-        assert_near_equal(prob["aero_point_0.surface_perf.CD"][0], 0.04946752, 1e-6)
-        assert_near_equal(prob["aero_point_0.surface_perf.CL"][0], 0.3, 1e-6)
-        assert_near_equal(prob["aero_point_0.CM"][1], -0.05045758, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_0.surface_perf.CD")[0], 0.04946752, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_0.surface_perf.CL")[0], 0.3, 1e-6)
+        assert_near_equal(prob.get_val("aero_point_0.CM")[1], -0.05045758, 1e-6)
 
 
 if __name__ == "__main__":

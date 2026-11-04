@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from openaerostruct.geometry.geometry_unification import GeomMultiUnification
-from openaerostruct.geometry.utils import build_section_dicts
+from openaerostruct.geometry.multi_section import build_section_dicts
 from openaerostruct.geometry.utils import stretch, sweep, dihedral
 from openaerostruct.utils.testing import run_test, get_three_section_surface
 

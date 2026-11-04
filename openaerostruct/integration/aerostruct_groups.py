@@ -13,6 +13,9 @@ from openaerostruct.aerodynamics.geometry import VLMGeometry
 from openaerostruct.aerodynamics.states import VLMStates
 from openaerostruct.functionals.total_performance import TotalPerformance
 from openaerostruct.geometry.geometry_group import Geometry
+from openaerostruct.geometry.geometry_multi_join import GeomMultiJoin
+from openaerostruct.geometry.geometry_unification import GeomMultiUnification
+from openaerostruct.geometry.multi_section import build_section_dicts, scalar_overlay
 from openaerostruct.structures.spatial_beam_functionals import SpatialBeamFunctionals
 from openaerostruct.structures.spatial_beam_setup import SpatialBeamSetup
 from openaerostruct.structures.spatial_beam_states import SpatialBeamStates
@@ -21,7 +24,7 @@ from openaerostruct.structures.wingbox_group import WingboxGroup
 from openaerostruct.transfer.displacement_transfer_group import DisplacementTransferGroup
 from openaerostruct.transfer.load_transfer import LoadTransfer
 from openaerostruct.utils.om4_utils import field_values
-from openaerostruct.utils.surface import Surface
+from openaerostruct.utils.surface import MultiSectionSurface, Surface
 
 
 def _aerostruct_geometry_kwargs(surface: Surface, connect_geom_DVs: bool) -> dict:
@@ -101,6 +104,135 @@ class AerostructGeometry(om.Group):
         data.pop("DVGeo", None)
         f = field_values(cls, data)
         data.update(_aerostruct_geometry_kwargs(f.surface, f.connect_geom_DVs))
+        return data
+
+
+def _multisec_aerostruct_geometry_kwargs(
+    surface: MultiSectionSurface,
+    connect_geom_DVs: bool,
+    joining_comp: bool,
+    dim_constr: list,
+    shift_uni_mesh: bool,
+) -> dict:
+    """
+    Combine the multi-section geometry (per-section Geometry + unification/joining, as in
+    ``_multisec_geometry_kwargs``) with the structural half of ``_aerostruct_geometry_kwargs``.
+
+    The unification component's unified mesh (and t_over_c, if active) are promoted straight to
+    "mesh"/"t_over_c" at this group's level, the same promoted names the structural subsystems
+    below declare as inputs -- om4 auto-connects same-named promoted vars within one group, so no
+    explicit connection is needed between them. The structural subsystems still take a plain
+    `Surface`-shaped overlay of `surface` (every per-section/list-only field dropped) for sizing;
+    the caller is expected to have already written the unified mesh into `surface.mesh` (mirrors
+    `Geometry._resolve_gen_mesh`'s "gen-mesh" convention).
+    """
+    sec_dicts = build_section_dicts(surface)
+    subs = {sec["name"]: Geometry(surface=sec) for sec in sec_dicts}
+    connections = []
+
+    has_t_over_c = "t_over_c_cp" in surface
+    unification_name = f"{surface.name}_unification"
+    promotes_outputs = [(f"{surface.name}_uni_mesh", "mesh")]
+    if has_t_over_c:
+        promotes_outputs.append((f"{surface.name}_uni_t_over_c", "t_over_c"))
+    subs[unification_name] = GeomMultiUnification(
+        sections=sec_dicts,
+        surface_name=surface.name,
+        shift_uni_mesh=shift_uni_mesh,
+        promotes_outputs=promotes_outputs,
+    )
+    for sec in sec_dicts:
+        connections.append(om.Connection(src=f"{sec['name']}.mesh", tgt=f"{unification_name}.{sec['name']}_def_mesh"))
+    if has_t_over_c:
+        for sec in sec_dicts:
+            connections.append(
+                om.Connection(src=f"{sec['name']}.t_over_c", tgt=f"{unification_name}.{sec['name']}_t_over_c")
+            )
+
+    if joining_comp:
+        joining_name = f"{surface.name}_joining"
+        subs[joining_name] = GeomMultiJoin(sections=sec_dicts, dim_constr=dim_constr)
+        for sec in sec_dicts:
+            connections.append(
+                om.Connection(src=f"{sec['name']}.mesh", tgt=f"{joining_name}.{sec['name']}_join_mesh")
+            )
+
+    overlay = scalar_overlay(surface)
+
+    fem_model_type = overlay["fem_model_type"].lower()
+    if fem_model_type == "tube":
+        tube_in = []
+        if "thickness_cp" in overlay and connect_geom_DVs:
+            tube_in.append("thickness_cp")
+        if "radius_cp" not in overlay:
+            tube_in += ["mesh", "t_over_c"]
+        subs["tube_group"] = TubeGroup(
+            surface=overlay,
+            promotes_inputs=tube_in,
+            promotes_outputs=["A", "Iy", "Iz", "J", "radius", "thickness"],
+        )
+    elif fem_model_type == "wingbox":
+        wingbox_in = ["mesh", "t_over_c"]
+        wingbox_out = ["A", "Iy", "Iz", "J", "Qz", "A_enc", "A_int", "htop", "hbottom", "hfront", "hrear"]
+        has_skin = "skin_thickness_cp" in overlay
+        has_spar = "spar_thickness_cp" in overlay
+        if has_skin and has_spar:
+            wingbox_in += ["skin_thickness_cp", "spar_thickness_cp"]
+            wingbox_out += ["skin_thickness", "spar_thickness"]
+        elif has_skin or has_spar:
+            raise NameError("Please have both skin and spar thickness as design variables, not one or the other.")
+        subs["wingbox_group"] = WingboxGroup(surface=overlay, promotes_inputs=wingbox_in, promotes_outputs=wingbox_out)
+    else:
+        raise NameError("Please select a valid `fem_model_type` from either `tube` or `wingbox`.")
+
+    setup_in = ["mesh", "A", "Iy", "Iz", "J"]
+    if fem_model_type == "wingbox":
+        setup_in.append("A_int")
+    subs["struct_setup"] = SpatialBeamSetup(
+        surface=overlay,
+        promotes_inputs=setup_in,
+        promotes_outputs=["nodes", "local_stiff_transformed", "structural_mass", "cg_location", "element_mass"],
+    )
+
+    return {"subsystems": subs, "connections": connections}
+
+
+class MultiSecAerostructGeometry(om.Group):
+    """
+    Geometry, structural properties and FEM setup of a multi-section aerostructural surface.
+
+    Each section is built as its own Geometry group; GeomMultiUnification stitches their meshes
+    (and t_over_c, if active) into the unified mesh/distribution the structural subsystems and
+    the aero point consume, mirroring AerostructGeometry. GeomMultiJoin optionally reports the
+    leading/trailing-edge separation between adjacent sections for the caller to constrain.
+    """
+
+    surface: MultiSectionSurface
+    connect_geom_DVs: bool = True
+    joining_comp: bool = False
+    dim_constr: list = Field(default_factory=list)
+    shift_uni_mesh: bool = True
+
+    # Derived from the fields above; not part of the constructor API.
+    subsystems: dict[str, Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
+    connections: list[om.Connection] = Field(default=PydanticUndefined, init=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _build_from_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        surface = data.get("surface")
+        if not isinstance(surface, MultiSectionSurface):
+            surface = MultiSectionSurface.model_validate(surface)
+        data["surface"] = surface
+        connect_geom_DVs = data.get("connect_geom_DVs", cls.model_fields["connect_geom_DVs"].default)
+        joining_comp = data.get("joining_comp", cls.model_fields["joining_comp"].default)
+        dim_constr = data.get("dim_constr") or cls.model_fields["dim_constr"].default_factory()
+        shift_uni_mesh = data.get("shift_uni_mesh", cls.model_fields["shift_uni_mesh"].default)
+        data.update(
+            _multisec_aerostruct_geometry_kwargs(surface, connect_geom_DVs, joining_comp, dim_constr, shift_uni_mesh)
+        )
         return data
 
 

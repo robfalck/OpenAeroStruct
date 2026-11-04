@@ -96,7 +96,15 @@ petsc = "*"
 petsc4py = "*"
 
 [feature.petsc.target.osx-arm64.dependencies]
-openmpi = "*"
+# Pinned: openmpi 5.0.10/5.0.11 fail MPI_Init on this machine ("PML add procs
+# failed" / "PML modex ... not found" -- rank 1 can never find rank 0's PML
+# business card). Reproduces with a bare 2-rank mpi4py script outside OAS/pixi
+# entirely, so it's an openmpi/PMIx regression, not an OAS or sandboxing issue.
+# Tried restricting PRRTE/OMPI to loopback-only BTL/PML/OOB and forcing the
+# hash-based PMIx GDS component -- no effect, still fails (and rank 0 then
+# segfaults in PMIx_Finalize once rank 1 dies). 5.0.8 (conda-forge build from
+# 2026-01-17) still works.
+openmpi = "5.0.8.*"
 mpi4py = "*"
 petsc = "*"
 petsc4py = "*"

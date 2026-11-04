@@ -9,9 +9,12 @@ from om4.core.system import System
 from om4.utils.polymorphic import Polymorphic
 
 from openaerostruct.geometry.geometry_mesh import GeometryMesh
+from openaerostruct.geometry.geometry_multi_join import GeomMultiJoin
+from openaerostruct.geometry.geometry_unification import GeomMultiUnification
+from openaerostruct.geometry.multi_section import build_section_dicts
 from openaerostruct.utils.interpolation import get_normalized_span_coords
 from openaerostruct.utils.om4_utils import field_values, spline_or_broadcast
-from openaerostruct.utils.surface import Surface
+from openaerostruct.utils.surface import MultiSectionSurface, Surface
 
 
 # (control-point key, interpolated name, units, interpolate at panel midpoints, x_cp range)
@@ -119,4 +122,73 @@ class Geometry(om.Group):
         surface = _resolve_gen_mesh(f.surface)
         data["surface"] = surface
         data.update(_geometry_kwargs(surface))
+        return data
+
+
+def _multisec_geometry_kwargs(
+    surface: MultiSectionSurface, joining_comp: bool, dim_constr: list, shift_uni_mesh: bool
+) -> dict:
+    """Return the Group spec for MultiSecGeometry: one Geometry per section, unified and (optionally) joined."""
+    sec_dicts = build_section_dicts(surface)
+
+    subs = {sec["name"]: Geometry(surface=sec) for sec in sec_dicts}
+    connections = []
+
+    unification_name = f"{surface.name}_unification"
+    subs[unification_name] = GeomMultiUnification(
+        sections=sec_dicts, surface_name=surface.name, shift_uni_mesh=shift_uni_mesh
+    )
+    for sec in sec_dicts:
+        connections.append(
+            om.Connection(src=f"{sec['name']}.mesh", tgt=f"{unification_name}.{sec['name']}_def_mesh")
+        )
+    if "t_over_c_cp" in surface:
+        for sec in sec_dicts:
+            connections.append(
+                om.Connection(src=f"{sec['name']}.t_over_c", tgt=f"{unification_name}.{sec['name']}_t_over_c")
+            )
+
+    if joining_comp:
+        joining_name = f"{surface.name}_joining"
+        subs[joining_name] = GeomMultiJoin(sections=sec_dicts, dim_constr=dim_constr)
+        for sec in sec_dicts:
+            connections.append(
+                om.Connection(src=f"{sec['name']}.mesh", tgt=f"{joining_name}.{sec['name']}_join_mesh")
+            )
+
+    return {"subsystems": subs, "connections": connections}
+
+
+class MultiSecGeometry(om.Group):
+    """
+    Group containing the section Geometry groups for a multi-section surface.
+
+    Each section is built as its own Geometry group, then GeomMultiUnification stitches their
+    meshes (and t_over_c, if active) into one unified mesh/distribution. Optionally, GeomMultiJoin
+    computes the leading/trailing-edge separation between adjacent sections, which a caller can
+    constrain to keep sections from separating or intersecting under scalar span/sweep DVs.
+    """
+
+    surface: MultiSectionSurface
+    joining_comp: bool = False
+    dim_constr: list = Field(default_factory=list)
+    shift_uni_mesh: bool = True
+
+    # Derived from the fields above; not part of the constructor API.
+    subsystems: dict[str, Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
+    connections: list[om.Connection] = Field(default=PydanticUndefined, init=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _build_from_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        surface = data.get("surface")
+        if not isinstance(surface, MultiSectionSurface):
+            surface = MultiSectionSurface.model_validate(surface)
+        data["surface"] = surface
+        joining_comp = data.get("joining_comp", cls.model_fields["joining_comp"].default)
+        dim_constr = data.get("dim_constr") or cls.model_fields["dim_constr"].default_factory()
+        shift_uni_mesh = data.get("shift_uni_mesh", cls.model_fields["shift_uni_mesh"].default)
+        data.update(_multisec_geometry_kwargs(surface, joining_comp, dim_constr, shift_uni_mesh))
         return data

@@ -1,23 +1,22 @@
-from openmdao.utils.assert_utils import assert_near_equal
 import unittest
 
-import openmdao
+import numpy as np
+
+import om4.api as om
+from om4.transforms.transform import AffineTransform
+from om4.utils.assert_utils import assert_near_equal
+from om4.utils.promotion import PromotesSpec
+from om4.variables.design_var import DesignVar
+from om4.variables.response import Constraint, Objective
+
+from openaerostruct.aerodynamics.aero_groups import AeroPoint
+from openaerostruct.geometry.geometry_group import Geometry, MultiSecGeometry
+from openaerostruct.geometry.multi_section import build_section_dicts, scalar_overlay, unify_mesh
+from openaerostruct.utils.testing import get_single_section_surface, get_two_section_surface
 
 
-# skip this test on OpenMDAO 3.40.0 because it fails due to a bug in OM 3.40.0
-@unittest.skipIf(openmdao.__version__ == "3.40.0", "Skipped on OpenMDAO 3.40.0")
 class Test(unittest.TestCase):
     def test(self):
-        import numpy as np
-
-        import openmdao.api as om
-
-        from openaerostruct.geometry.geometry_group import Geometry, MultiSecGeometry
-        from openaerostruct.aerodynamics.aero_groups import AeroPoint
-        from openaerostruct.geometry.utils import build_section_dicts
-        from openaerostruct.geometry.utils import unify_mesh
-        from openaerostruct.utils.testing import get_two_section_surface, get_single_section_surface
-
         """Create a dictionary with info and options about the aerodynamic
         single section lifting surface"""
         surfaceSingle = get_single_section_surface()
@@ -27,115 +26,89 @@ class Test(unittest.TestCase):
         surfaceMulti, sec_chord_cp = get_two_section_surface()
         surfaceMulti["name"] = "surfaceMulti"
 
-        # Create the OpenMDAO problem
-        prob = om.Problem()
-
-        # Create an independent variable component that will supply the flow
-        # conditions to the problem.
-        indep_var_comp = om.IndepVarComp()
-        indep_var_comp.add_output("v", val=1.0, units="m/s")
-        indep_var_comp.add_output("alpha", val=10.0 * np.ones(2), units="deg")
-        indep_var_comp.add_output("Mach_number", val=0.3)
-        indep_var_comp.add_output("re", val=1.0e5, units="1/m")
-        indep_var_comp.add_output("rho", val=0.38, units="kg/m**3")
-        indep_var_comp.add_output("cg", val=np.zeros((3)), units="m")
-
-        # Add this IndepVarComp to the problem model
-        prob.model.add_subsystem("prob_vars", indep_var_comp, promotes=["*"])
-
-        # Create and add a group that handles the geometry for the
-        # aerodynamic single lifting surface
-        geom_group = Geometry(surface=surfaceSingle)
-        prob.model.add_subsystem(surfaceSingle["name"], geom_group)
-
-        # Create the aero point group, which contains the actual aerodynamic
-        # analyses for the single section surface
-        aero_group = AeroPoint(surfaces=[surfaceSingle])
-        point_name0 = "aero_point_0"
-        prob.model.add_subsystem(point_name0, aero_group)
-        name = surfaceSingle["name"]
-
-        # Connect Flight conditions
-        prob.model.connect("v", point_name0 + ".v")
-        prob.model.connect("alpha", point_name0 + ".alpha", src_indices=[0])
-        prob.model.connect("Mach_number", point_name0 + ".Mach_number")
-        prob.model.connect("re", point_name0 + ".re")
-        prob.model.connect("rho", point_name0 + ".rho")
-        prob.model.connect("cg", point_name0 + ".cg")
-
-        # Connect the mesh from the geometry component to the analysis point
-        prob.model.connect(name + ".mesh", point_name0 + "." + name + ".def_mesh")
-        # Perform the connections with the modified names within the
-        # 'aero_states' group.
-        prob.model.connect(name + ".mesh", point_name0 + ".aero_states." + name + "_def_mesh")
-
-        # Create and add a group that handles the geometry for the
-        # multi-section aerodynamic lifting surface
-        multi_geom_group = MultiSecGeometry(
-            surface=surfaceMulti, joining_comp=True, dim_constr=[np.array([1, 0, 0]), np.array([1, 0, 0])]
-        )
-        prob.model.add_subsystem(surfaceMulti["name"], multi_geom_group)
-
         # Generate the sections and unified mesh here in addition to adding the components.
         # This has to also be done here since AeroPoint has to know the unified mesh size.
         section_surfaces = build_section_dicts(surfaceMulti)
         uni_mesh = unify_mesh(section_surfaces)
         surfaceMulti["mesh"] = uni_mesh
 
-        # Create the aero point group, which contains the actual aerodynamic
-        # analyses
-        aero_group = AeroPoint(surfaces=[surfaceMulti])
-        point_name1 = "aero_point_1"
-        prob.model.add_subsystem(point_name1, aero_group)
+        subsystems = {
+            "surface": Geometry(surface=surfaceSingle),
+            "aero_point_0": AeroPoint(
+                surfaces=[surfaceSingle],
+                promotes_inputs=[
+                    "v",
+                    "Mach_number",
+                    "re",
+                    "rho",
+                    "cg",
+                    PromotesSpec(patterns=["alpha"], src_indices=[0], src_shape=(2,)),
+                ],
+            ),
+            "surfaceMulti": MultiSecGeometry(
+                surface=surfaceMulti, joining_comp=True, dim_constr=[np.array([1, 0, 0]), np.array([1, 0, 0])]
+            ),
+            "aero_point_1": AeroPoint(
+                surfaces=[scalar_overlay(surfaceMulti)],
+                promotes_inputs=[
+                    "v",
+                    "Mach_number",
+                    "re",
+                    "rho",
+                    "cg",
+                    PromotesSpec(patterns=["alpha"], src_indices=[1], src_shape=(2,)),
+                ],
+            ),
+        }
 
-        # Connect Flight conditions
-        prob.model.connect("v", point_name1 + ".v")
-        prob.model.connect("alpha", point_name1 + ".alpha", src_indices=[1])
-        prob.model.connect("Mach_number", point_name1 + ".Mach_number")
-        prob.model.connect("re", point_name1 + ".re")
-        prob.model.connect("rho", point_name1 + ".rho")
-        prob.model.connect("cg", point_name1 + ".cg")
+        connections = [
+            # Connect the mesh from the single-section geometry component to its analysis point.
+            om.Connection(src="surface.mesh", tgt="aero_point_0.surface.def_mesh"),
+            om.Connection(src="surface.mesh", tgt="aero_point_0.aero_states.surface_def_mesh"),
+            # Connect the unified mesh from the mesh unification component to its analysis point.
+            om.Connection(
+                src="surfaceMulti.surfaceMulti_unification.surfaceMulti_uni_mesh",
+                tgt="aero_point_1.surfaceMulti.def_mesh",
+            ),
+            om.Connection(
+                src="surfaceMulti.surfaceMulti_unification.surfaceMulti_uni_mesh",
+                tgt="aero_point_1.aero_states.surfaceMulti_def_mesh",
+            ),
+        ]
 
-        # Get name of surface and construct unified mesh name
-        name = surfaceMulti["name"]
-        unification_name = "{}_unification".format(surfaceMulti["name"])
-
-        # Connect the mesh from the mesh unification component to the analysis point
-        prob.model.connect(
-            name + "." + unification_name + "." + name + "_uni_mesh", point_name1 + "." + name + ".def_mesh"
+        prob = om.Problem(
+            model=om.Group(
+                subsystems=subsystems,
+                connections=connections,
+                design_vars={"alpha": DesignVar(lower=0.0, upper=10.0)},
+                constraints={
+                    "aero_point_0.CL": Constraint(equals=0.3),
+                    "aero_point_1.CL": Constraint(equals=0.3),
+                },
+                objectives={"aero_point_0.CD": Objective(transform=AffineTransform.from_scaler_adder(scaler=1e4))},
+                optimizer=om.ScipyMinimizeOptimizer(optimizer="SLSQP", tol=1e-6, maxiter=1000),
+            )
         )
 
-        # Perform the connections with the modified names within the
-        # 'aero_states' group.
-        prob.model.connect(
-            name + "." + unification_name + "." + name + "_uni_mesh",
-            point_name1 + ".aero_states." + name + "_def_mesh",
+        prob.set_val("v", 1.0, units="m/s")
+        prob.set_val("alpha", 10.0 * np.ones(2), units="deg")
+        prob.set_val("Mach_number", 0.3)
+        prob.set_val("re", 1.0e5, units="1/m")
+        prob.set_val("rho", 0.38, units="kg/m**3")
+        prob.set_val("cg", np.zeros(3), units="m")
+
+        prob.run_optimizer()
+        # Workaround for om4 B-018 (ai/OM4_NEEDS.md): CD isn't part of any declared
+        # design_var/constraint/objective here (only CL is), so it can be left stale by
+        # run_optimizer(); force a full re-propagation before reading it.
+        prob.run_model()
+
+        CDDiff = np.abs(
+            prob.get_val("aero_point_1.surfaceMulti_perf.CD")[0] - prob.get_val("aero_point_0.surface_perf.CD")[0]
         )
-
-        # Add DVs
-        prob.model.add_design_var("alpha", lower=0.0, upper=10.0, units="deg")
-
-        # Add CL constraint
-        prob.model.add_constraint(point_name0 + ".CL", equals=0.3)
-        prob.model.add_constraint(point_name1 + ".CL", equals=0.3)
-
-        # Add objective
-        prob.model.add_objective(point_name0 + ".CD", scaler=1e4)
-
-        prob.driver = om.ScipyOptimizeDriver()
-        prob.driver.options["optimizer"] = "SLSQP"
-        prob.driver.options["tol"] = 1e-6
-        prob.driver.options["disp"] = True
-        prob.driver.options["maxiter"] = 1000
-        # prob.driver.options["debug_print"] = ["nl_cons", "objs", "desvars"]
-
-        # Set up and run the optimization problem
-        prob.setup()
-
-        prob.run_driver()
-
-        CDDiff = np.abs(prob["aero_point_1.surfaceMulti_perf.CD"][0] - prob["aero_point_0.surface_perf.CD"][0])
-        CLDiff = np.abs(prob["aero_point_1.surfaceMulti_perf.CL"][0] - prob["aero_point_0.surface_perf.CL"][0])
+        CLDiff = np.abs(
+            prob.get_val("aero_point_1.surfaceMulti_perf.CL")[0] - prob.get_val("aero_point_0.surface_perf.CL")[0]
+        )
 
         assert_near_equal(CDDiff, 0.0, 1e-6)
         assert_near_equal(CLDiff, 0.0, 1e-6)
