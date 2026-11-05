@@ -8,6 +8,7 @@ import om4.api as om
 from om4.core.system import System
 from om4.utils.polymorphic import Polymorphic
 
+from openaerostruct.aerodynamics.compressible_states import CompressibleVLMStates
 from openaerostruct.aerodynamics.functionals import VLMFunctionals
 from openaerostruct.aerodynamics.geometry import VLMGeometry
 from openaerostruct.aerodynamics.states import VLMStates
@@ -361,9 +362,6 @@ def _aerostruct_point_kwargs(
     rotational: bool,
     fen: bool,
 ) -> dict:
-    if compressible:
-        raise NotImplementedError("Compressible VLM states are not yet ported to om4; see ai/TECH_DEBT.md.")
-
     coupled_subs = {}
     coupled_conns = []
     connections = []
@@ -421,18 +419,23 @@ def _aerostruct_point_kwargs(
     ground_effect = any(surface.get("groundplane", False) for surface in surfaces)
 
     prom_in = ["v", "alpha", "beta", "rho"]
+    if compressible:
+        prom_in.append("Mach_number")
     if ground_effect:
         prom_in.append("height_agl")
     if rotational:
         prom_in.extend(["omega", ("cg", "empty_cg")])
 
     # A single 'aero_states' group for the whole system within the coupled group.
-    coupled_subs["aero_states"] = VLMStates(surfaces=surfaces, rotational=rotational, promotes_inputs=prom_in)
+    aero_states_cls = CompressibleVLMStates if compressible else VLMStates
+    coupled_subs["aero_states"] = aero_states_cls(surfaces=surfaces, rotational=rotational, promotes_inputs=prom_in)
 
     for surface in surfaces:
         coupled_subs[surface["name"] + "_loads"] = LoadTransfer(surface=surface)
 
     coupled_prom_in = ["v", "alpha", "beta", "rho"]
+    if compressible:
+        coupled_prom_in.append("Mach_number")
     if ground_effect:
         coupled_prom_in.append("height_agl")
     if rotational:
@@ -530,7 +533,7 @@ class AerostructPoint(om.Group):
     user_specified_Sref: bool = False
     internally_connect_fuelburn: bool = True
     compressible: bool = Field(
-        default=False, description="Compressibility correction for moderate Mach number flows (not yet ported)."
+        default=False, description="Compressibility correction for moderate Mach number flows."
     )
     rotational: bool = Field(default=False, description="Turn on support for computing angular velocities.")
     fen: bool = Field(

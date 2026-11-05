@@ -10,6 +10,7 @@ from om4.utils.polymorphic import Polymorphic
 
 from openaerostruct.aerodynamics.geometry import VLMGeometry
 from openaerostruct.aerodynamics.states import VLMStates
+from openaerostruct.aerodynamics.compressible_states import CompressibleVLMStates
 from openaerostruct.aerodynamics.functionals import VLMFunctionals
 from openaerostruct.functionals.total_aero_performance import TotalAeroPerformance
 from openaerostruct.utils.om4_utils import field_values
@@ -20,9 +21,6 @@ def _aero_point_kwargs(
     surfaces: list[Surface], user_specified_Sref: bool, rotational: bool, compressible: bool
 ) -> dict:
     """Return the Group spec for AeroPoint: per-surface geometry, the VLM states, and performance."""
-    if compressible:
-        raise NotImplementedError("Compressible VLM states are not yet ported to om4; see ai/TECH_DEBT.md.")
-
     subs = {}
     connections = []
 
@@ -61,12 +59,15 @@ def _aero_point_kwargs(
     ground_effect = any(surface.get("groundplane", False) for surface in surfaces)
 
     prom_in = ["v", "alpha", "beta", "rho"]
+    if compressible:
+        prom_in.append("Mach_number")
     if ground_effect:
         prom_in.append("height_agl")
     if rotational:
         prom_in.extend(["omega", "cg"])
 
-    subs["aero_states"] = VLMStates(
+    aero_states_cls = CompressibleVLMStates if compressible else VLMStates
+    subs["aero_states"] = aero_states_cls(
         surfaces=surfaces,
         rotational=rotational,
         linear_solver=om.LinearRunOnce(),
@@ -97,6 +98,10 @@ def _aero_point_kwargs(
         "v": om.InputDefault(val=np.ones(1), units="m/s"),
         "rho": om.InputDefault(val=np.ones(1), units="kg/m**3"),
     }
+    if compressible:
+        # pg_scale.py's Mach_number default (0.0) disagrees with viscous_drag.py/wave_drag.py's
+        # (1.6) once aero_states also promotes it, same ambiguity pattern as alpha/beta above
+        input_defaults["Mach_number"] = om.InputDefault(val=np.zeros(1))
 
     return {"subsystems": subs, "connections": connections, "input_defaults": input_defaults}
 
@@ -112,7 +117,7 @@ class AeroPoint(om.Group):
     user_specified_Sref: bool = False
     rotational: bool = Field(default=False, description="Turn on support for computing angular velocities.")
     compressible: bool = Field(
-        default=False, description="Compressibility correction for moderate Mach number flows (not yet ported)."
+        default=False, description="Compressibility correction for moderate Mach number flows."
     )
 
     # Derived from the fields above; not part of the constructor API.

@@ -1,7 +1,30 @@
-import openmdao.api as om
+from typing import Any
+
+from pydantic import Field, model_validator
+from pydantic_core import PydanticUndefined
+
+import om4.api as om
+from om4.core.system import System
+from om4.utils.polymorphic import Polymorphic
 
 from openaerostruct.aerodynamics.pg_wind_rotation import RotateToWindFrame, RotateFromWindFrame
 from openaerostruct.aerodynamics.pg_scale import ScaleToPrandtlGlauert, ScaleFromPrandtlGlauert
+from openaerostruct.utils.om4_utils import field_values
+from openaerostruct.utils.surface import Surface
+
+
+def _pg_transform_kwargs(surfaces: list[Surface], rotational: bool) -> dict:
+    """Return the Group spec for PGTransform: rotate to wind frame, then scale to PG."""
+    return {
+        "subsystems": {
+            "rotate": RotateToWindFrame(
+                surfaces=surfaces, rotational=rotational, promotes_inputs=["*"], promotes_outputs=["*"]
+            ),
+            "scale": ScaleToPrandtlGlauert(
+                surfaces=surfaces, rotational=rotational, promotes_inputs=["*"], promotes_outputs=["*"]
+            ),
+        }
+    }
 
 
 class PGTransform(om.Group):
@@ -20,32 +43,30 @@ class PGTransform(om.Group):
         equivalent Prandtl-Glauert geometry.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
-        self.options.declare(
-            "rotational", False, types=bool, desc="Set to True to turn on support for computing angular velocities"
-        )
+    surfaces: list[Surface]
+    rotational: bool = Field(default=False, description="Turn on support for computing angular velocities.")
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
-        rotational = self.options["rotational"]
+    # Derived from the fields above; not part of the constructor API.
+    subsystems: dict[str, Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
 
-        # Create component to rotate mesh geometry to wind frame,
-        # s.t. the freestream velocity is along the x-axis
-        self.add_subsystem(
-            "rotate",
-            RotateToWindFrame(surfaces=surfaces, rotational=rotational),
-            promotes_inputs=["*"],
-            promotes_outputs=["*"],
-        )
+    @model_validator(mode="before")
+    @classmethod
+    def _build_from_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        data.update(_pg_transform_kwargs(f.surfaces, f.rotational))
+        return data
 
-        # Scale y and z direction by Prandtl Glauert factor
-        self.add_subsystem(
-            "scale",
-            ScaleToPrandtlGlauert(surfaces=surfaces, rotational=rotational),
-            promotes_inputs=["*"],
-            promotes_outputs=["*"],
-        )
+
+def _inverse_pg_transform_kwargs(surfaces: list[Surface]) -> dict:
+    """Return the Group spec for InversePGTransform: scale back to wind frame, then rotate to aero frame."""
+    return {
+        "subsystems": {
+            "scale": ScaleFromPrandtlGlauert(surfaces=surfaces, promotes_inputs=["*"], promotes_outputs=["*"]),
+            "rotate": RotateFromWindFrame(surfaces=surfaces, promotes_inputs=["*"], promotes_outputs=["*"]),
+        }
+    }
 
 
 class InversePGTransform(om.Group):
@@ -63,16 +84,16 @@ class InversePGTransform(om.Group):
         2. Rotate physical forces from wind frame to the aerodynamic frame.
     """
 
-    def initialize(self):
-        self.options.declare("surfaces", types=list)
+    surfaces: list[Surface]
 
-    def setup(self):
-        surfaces = self.options["surfaces"]
+    # Derived from the fields above; not part of the constructor API.
+    subsystems: dict[str, Polymorphic[System]] = Field(default=PydanticUndefined, init=False)
 
-        # Scale force vectors back to compressible values
-        scale_sys = ScaleFromPrandtlGlauert(surfaces=surfaces)
-        self.add_subsystem("scale", scale_sys, promotes_inputs=["*"], promotes_outputs=["*"])
-
-        # Rotate forces back to aerodynamic frame
-        rot_sys = RotateFromWindFrame(surfaces=surfaces)
-        self.add_subsystem("rotate", rot_sys, promotes_inputs=["*"], promotes_outputs=["*"])
+    @model_validator(mode="before")
+    @classmethod
+    def _build_from_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        f = field_values(cls, data)
+        data.update(_inverse_pg_transform_kwargs(f.surfaces))
+        return data

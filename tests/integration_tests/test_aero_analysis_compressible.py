@@ -9,7 +9,6 @@ from openaerostruct.aerodynamics.aero_groups import AeroPoint
 
 
 class Test(unittest.TestCase):
-    @unittest.skip("Compressible VLM states are not ported to om4 yet (TD-002)")
     def test(self):
         # Create a dictionary to store options about the surface
         mesh_dict = {"num_y": 7, "num_x": 2, "wing_type": "CRM", "symmetry": True, "num_twist_cp": 5}
